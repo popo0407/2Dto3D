@@ -1,0 +1,19 @@
+{
+  "app": "python app.py",
+  "context": {
+    "environment": "dev",
+    "useMockAI": true,
+    "bedrockRegion": "ap-northeast-1"
+  },
+  "watch": {
+    "include": ["**"],
+    "exclude": [
+      "README.md",
+      "cdk*.json",
+      "requirements*.txt",
+      "**/__pycache__",
+      "**/*.pyc",
+      "tests"
+    ]
+  }
+}
