@@ -96,6 +96,26 @@
 ### 改善策・再発防止
 - CDK Step Functions の `LambdaInvoke` は **必ず `payload_response_only=True`** を指定する。デフォルトでは `{Payload, StatusCode, ExecutedVersion}` のラッパーが付くため、次ステップの Lambda が直接フィールドを参照できなくなる
 - 非同期処理の通知を受け取るWebSocket接続は、処理起動より**前**に確立・登録しておく（先にWSを開いてから処理をキックする順序を徹底する）
+
+---
+
+## 2026-03 進捗0%スタック バグ修正（第2弾）
+
+### 実施内容
+- CDKデプロイ後も0%のまま進まない問題を継続調査・修正
+
+### 発生した問題と対処
+
+| 問題 | 原因 | 対処 |
+|------|------|------|
+| dev環境でも進捗0%が続く | `pipeline_stack.py` に `enableFargate` 分岐がなく、dev環境でも常にECS Fargate（CadQuery Docker コンテナ）が実行されていた。コンテナ起動・実行失敗でパイプラインがサイレントにクラッシュし、notifyハンドラーまで到達しないため進捗通知ゼロ | `enable_fargate: bool` パラメータを `PipelineStack` に追加。`enable_fargate=False`（dev）の場合はDockerビルド不要の `mock_cadquery` Lambdaを使用するよう分岐 |
+| パイプラインエラーがフロントエンドに届かない | Step Functions エラー時に全てサイレントで終了し、WebSocket経由での通知が一切なかった | `pipeline_error_handler` Lambdaを新規作成し、全ステップに `add_catch(errors=["States.ALL"])` を設定。エラー時はセッションをFAILEDに更新してフロントにPROCESSING_FAILEDを送信 |
+| cdk.json に enableFargate の記載がなかった | 要件定義には記載があったが実装に反映されていなかった | `cdk.json` に `"enableFargate": false` を追加 |
+
+### 改善策・再発防止
+- CDK の `from_context` フラグは **必ず `cdk.json` に明示的に記載**する。requirements.md にあっても実装に反映されないと意味がない
+- Step Functions のステートマシンには必ず **エラーキャッチ+WebSocket通知** を設ける。サイレント失敗はデバッグが極めて困難
+- dev環境で重量コンテナ（ECS Fargate + CadQuery）を使うと毎回数分かかりコスト高・デバッグ困難。`enableFargate=false` でモックLambdaを使うパターンを標準化する
 - `boto3.client("s3")` は明示的に `region_name` と `config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"})` を設定する（特に署名付きURL生成時）
 - React Three Fiber では `useGLTF` フックを含む `@react-three/drei` コンポーネントは `<Suspense>` の内側に配置する必要がある
 - CDK でパイプラインのLambdaに渡す環境変数（APIのIDなど）は、依存スタックのエクスポート値を `extra_env` で明示的に渡し、実装コードではすべて環境変数から読み取る
