@@ -70,7 +70,7 @@ def lambda_handler(event: dict, context) -> dict:
     connections = _get_session_connections(conn_table, session_id)
 
     if not connections:
-        logger.info("No active connections for user %s", user_id)
+        logger.info("No active connections for session %s", session_id)
         return {"session_id": session_id, "node_id": node_id, "notified": False}
 
     # Send notification via API Gateway Management API

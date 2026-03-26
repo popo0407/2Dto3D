@@ -10,6 +10,7 @@ import os
 import time
 
 import boto3
+from common.ws_notify import send_progress
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -36,6 +37,7 @@ def lambda_handler(event: dict, context) -> dict:
     node_id = event["node_id"]
     parsed_data = event.get("parsed_data", {})
     logger.info("AI analyzing session %s, node %s", session_id, node_id)
+    send_progress(session_id, "AI_ANALYZING", 30, "AI図面解釈中...")
 
     # Update session status
     sessions_table = dynamodb.Table(SESSIONS_TABLE)

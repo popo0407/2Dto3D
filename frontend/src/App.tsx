@@ -11,11 +11,14 @@ type AppView = "upload" | "viewer";
 
 // WebSocket から届く通知メッセージの型
 interface WsNotifyMessage {
-  type: "PROCESSING_COMPLETE" | "PROCESSING_FAILED" | string;
+  type: "PROCESSING_COMPLETE" | "PROCESSING_FAILED" | "PROGRESS" | string;
   session_id?: string;
   node_id?: string;
   gltf_url?: string;
   error?: string;
+  step?: string;
+  progress?: number;
+  message?: string;
 }
 
 export default function App() {
@@ -24,6 +27,8 @@ export default function App() {
   const [nodeId, setNodeId] = useState<string>("");
   const [gltfUrl, setGltfUrl] = useState<string>("");
   const [idToken, setIdToken] = useState<string>("");
+  const [processingStep, setProcessingStep] = useState<string>("");
+  const [processingProgress, setProcessingProgress] = useState<number>(0);
 
   // WebSocket ref（セッションをまたいで保持）
   const wsRef = useRef<WebSocket | null>(null);
@@ -45,7 +50,11 @@ export default function App() {
       ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data as string) as WsNotifyMessage;
-          if (msg.type === "PROCESSING_COMPLETE" && msg.node_id && msg.gltf_url) {
+          if (msg.type === "PROGRESS") {
+            setProcessingStep(msg.step ?? "");
+            setProcessingProgress(msg.progress ?? 0);
+          } else if (msg.type === "PROCESSING_COMPLETE" && msg.node_id && msg.gltf_url) {
+            setProcessingProgress(100);
             ws.close();
             onComplete(msg.node_id, msg.gltf_url);
           } else if (msg.type === "PROCESSING_FAILED") {
@@ -76,6 +85,8 @@ export default function App() {
     setSessionId("");
     setNodeId("");
     setGltfUrl("");
+    setProcessingStep("");
+    setProcessingProgress(0);
     setView("upload");
   };
 
@@ -142,6 +153,8 @@ export default function App() {
             onSessionCreated={handleSessionCreated}
             onProcessingComplete={handleProcessingComplete}
             onProcessingStart={handleProcessingStart}
+            processingStep={processingStep}
+            processingProgress={processingProgress}
           />
         ) : (
           <>

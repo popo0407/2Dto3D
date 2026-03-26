@@ -10,13 +10,23 @@ interface UploadPanelProps {
     onComplete: (nodeId: string, url: string) => void,
     onError: (msg: string) => void,
   ) => void;
+  processingStep: string;
+  processingProgress: number;
 }
 
 type UploadStatus = "idle" | "uploading" | "processing" | "error";
 
 const ALLOWED_EXTENSIONS = [".dxf", ".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".tif"];
 
-export function UploadPanel({ idToken, onSessionCreated, onProcessingComplete, onProcessingStart }: UploadPanelProps) {
+const PIPELINE_STEPS = [
+  { key: "PARSING",      label: "ファイル解析中",    pct: 20 },
+  { key: "AI_ANALYZING", label: "AI図面解釈中", pct: 55 },
+  { key: "BUILDING",     label: "3Dモデル構築中",   pct: 70 },
+  { key: "OPTIMIZING",   label: "形状最適化中",   pct: 90 },
+  { key: "VALIDATING",   label: "品質検証中",    pct: 95 },
+];
+
+export function UploadPanel({ idToken, onSessionCreated, onProcessingComplete, onProcessingStart, processingStep, processingProgress }: UploadPanelProps) {
   const authHeader = { Authorization: `Bearer ${idToken}` };
 
   const [status, setStatus] = useState<UploadStatus>("idle");
@@ -179,9 +189,46 @@ export function UploadPanel({ idToken, onSessionCreated, onProcessingComplete, o
         )}
 
         {status === "processing" && sessionId && (
-          <p className="rounded-lg bg-blue-50 px-4 py-2 text-sm text-blue-700" role="status">
-            AIが3Dモデルを生成中です。完了すると自動的にビューアに切り替わります（数分かかる場合があります）
-          </p>
+          <div className="space-y-3">
+            <div className="flex items-center justify-between text-sm">
+              <span className="font-medium text-blue-700">
+                {PIPELINE_STEPS.find((s) => s.key === processingStep)?.label
+                  ?? (processingStep === "" ? "処理開始中..." : "処理中...")}
+              </span>
+              <span className="tabular-nums text-blue-600">{processingProgress}%</span>
+            </div>
+            <div className="h-2 w-full overflow-hidden rounded-full bg-blue-100" role="progressbar" aria-valuenow={processingProgress} aria-valuemin={0} aria-valuemax={100}>
+              <div
+                className="h-full rounded-full bg-blue-500 transition-all duration-700 ease-out"
+                style={{ width: `${processingProgress}%` }}
+              />
+            </div>
+            <ol className="flex justify-between" aria-label="パイプラインステップ">
+              {PIPELINE_STEPS.map((step) => {
+                const done = processingProgress >= step.pct;
+                const active = processingStep === step.key;
+                return (
+                  <li key={step.key} className="flex flex-col items-center gap-0.5">
+                    <span
+                      className={`flex h-5 w-5 items-center justify-center rounded-full text-xs font-bold transition-colors duration-500 ${
+                        done
+                          ? "bg-blue-500 text-white"
+                          : active
+                            ? "ring-2 ring-blue-400 bg-blue-100 text-blue-600"
+                            : "bg-gray-200 text-gray-400"
+                      }`}
+                      aria-hidden="true"
+                    >
+                      {done ? "✓" : PIPELINE_STEPS.indexOf(step) + 1}
+                    </span>
+                    <span className={`text-[10px] leading-tight text-center ${done || active ? "text-blue-600" : "text-gray-400"}`}>
+                      {step.label.replace("中", "")}
+                    </span>
+                  </li>
+                );
+              })}
+            </ol>
+          </div>
         )}
 
         <button

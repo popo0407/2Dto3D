@@ -10,6 +10,7 @@ import os
 import time
 
 import boto3
+from common.ws_notify import send_progress
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -33,6 +34,7 @@ def lambda_handler(event: dict, context) -> dict:
     """
     session_id = event["session_id"]
     node_id = event["node_id"]
+    send_progress(session_id, "OPTIMIZING", 75, "形状最適化中...")
     logger.info("Optimizing node %s", node_id)
 
     # Update session status

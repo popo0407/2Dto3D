@@ -50,6 +50,7 @@ class PipelineStack(Stack):
             "UPLOADS_BUCKET": uploads_bucket.bucket_name,
             "ARTIFACTS_BUCKET": artifacts_bucket.bucket_name,
             "PREVIEWS_BUCKET": previews_bucket.bucket_name,
+            "WEBSOCKET_API_ID": websocket_api.api_id,
         }
 
         # ---------- Common Layer ----------
@@ -90,9 +91,18 @@ class PipelineStack(Stack):
             )
             sessions_table.grant_read_write_data(fn)
             nodes_table.grant_read_write_data(fn)
+            connections_table.grant_read_write_data(fn)
             uploads_bucket.grant_read(fn)
             artifacts_bucket.grant_read_write(fn)
             previews_bucket.grant_read_write(fn)
+            fn.add_to_role_policy(
+                iam.PolicyStatement(
+                    actions=["execute-api:ManageConnections"],
+                    resources=[
+                        f"arn:aws:execute-api:{self.region}:{self.account}:{websocket_api.api_id}/*"
+                    ],
+                )
+            )
             return fn
 
         # Step 1: Parse handler
@@ -118,16 +128,6 @@ class PipelineStack(Stack):
             "notify_handler",
             timeout_seconds=30,
             memory_mb=256,
-            extra_env={"WEBSOCKET_API_ID": websocket_api.api_id},
-        )
-        connections_table.grant_read_data(notify_fn)
-        notify_fn.add_to_role_policy(
-            iam.PolicyStatement(
-                actions=["execute-api:ManageConnections"],
-                resources=[
-                    f"arn:aws:execute-api:{self.region}:{self.account}:{websocket_api.api_id}/*"
-                ],
-            )
         )
 
         # ---------- ECS Fargate (CadQuery Runner) ----------

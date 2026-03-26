@@ -11,6 +11,7 @@ import os
 import io
 
 import boto3
+from common.ws_notify import send_progress
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -33,6 +34,7 @@ def lambda_handler(event: dict, context) -> dict:
     """
     session_id = event["session_id"]
     logger.info("Parsing session %s", session_id)
+    send_progress(session_id, "PARSING", 10, "ファイルを解析中...")
 
     # Fetch session from DynamoDB
     sessions_table = dynamodb.Table(SESSIONS_TABLE)
