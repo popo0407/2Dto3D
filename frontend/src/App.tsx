@@ -1,12 +1,22 @@
-import { useState } from "react";
+import { useState, useRef, useCallback } from "react";
 import { Viewer3D } from "./components/Viewer3D";
 import { UploadPanel } from "./components/UploadPanel";
 import { ChatPanel } from "./components/ChatPanel";
 import { HistoryPanel } from "./components/HistoryPanel";
 import { LoginPanel } from "./components/LoginPanel";
 import { getIdToken, signOut } from "./auth";
+import { WS_URL } from "./config";
 
 type AppView = "upload" | "viewer";
+
+// WebSocket から届く通知メッセージの型
+interface WsNotifyMessage {
+  type: "PROCESSING_COMPLETE" | "PROCESSING_FAILED" | string;
+  session_id?: string;
+  node_id?: string;
+  gltf_url?: string;
+  error?: string;
+}
 
 export default function App() {
   const [view, setView] = useState<AppView>("upload");
@@ -15,12 +25,52 @@ export default function App() {
   const [gltfUrl, setGltfUrl] = useState<string>("");
   const [idToken, setIdToken] = useState<string>("");
 
+  // WebSocket ref（セッションをまたいで保持）
+  const wsRef = useRef<WebSocket | null>(null);
+
+  // UploadPanel から呼ばれる。処理開始後 WebSocket を接続して完了を待つ。
+  const handleProcessingStart = useCallback(
+    (sid: string, onComplete: (nodeId: string, url: string) => void, onError: (msg: string) => void) => {
+      // 既存 WS があれば閉じる
+      wsRef.current?.close();
+
+      const ws = new WebSocket(`${WS_URL}?session_id=${sid}`);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        // 接続後にセッションを subscribe する
+        ws.send(JSON.stringify({ action: "subscribe", session_id: sid }));
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data as string) as WsNotifyMessage;
+          if (msg.type === "PROCESSING_COMPLETE" && msg.node_id && msg.gltf_url) {
+            ws.close();
+            onComplete(msg.node_id, msg.gltf_url);
+          } else if (msg.type === "PROCESSING_FAILED") {
+            ws.close();
+            onError(msg.error ?? "処理に失敗しました");
+          }
+        } catch {
+          // JSON parse 失敗は無視
+        }
+      };
+
+      ws.onerror = () => {
+        onError("WebSocket 接続エラーが発生しました");
+      };
+    },
+    [],
+  );
+
   const handleLoginSuccess = async () => {
     const token = await getIdToken();
     setIdToken(token ?? "");
   };
 
   const handleSignOut = () => {
+    wsRef.current?.close();
     signOut();
     setIdToken("");
     setSessionId("");
@@ -91,6 +141,7 @@ export default function App() {
             idToken={idToken}
             onSessionCreated={handleSessionCreated}
             onProcessingComplete={handleProcessingComplete}
+            onProcessingStart={handleProcessingStart}
           />
         ) : (
           <>

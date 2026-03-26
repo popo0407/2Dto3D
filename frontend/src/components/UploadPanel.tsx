@@ -5,13 +5,18 @@ interface UploadPanelProps {
   idToken: string;
   onSessionCreated: (sessionId: string) => void;
   onProcessingComplete: (nodeId: string, gltfUrl: string) => void;
+  onProcessingStart: (
+    sessionId: string,
+    onComplete: (nodeId: string, url: string) => void,
+    onError: (msg: string) => void,
+  ) => void;
 }
 
 type UploadStatus = "idle" | "uploading" | "processing" | "error";
 
 const ALLOWED_EXTENSIONS = [".dxf", ".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".tif"];
 
-export function UploadPanel({ idToken, onSessionCreated, onProcessingComplete: _onComplete }: UploadPanelProps) {
+export function UploadPanel({ idToken, onSessionCreated, onProcessingComplete, onProcessingStart }: UploadPanelProps) {
   const authHeader = { Authorization: `Bearer ${idToken}` };
 
   const [status, setStatus] = useState<UploadStatus>("idle");
@@ -89,7 +94,18 @@ export function UploadPanel({ idToken, onSessionCreated, onProcessingComplete: _
       );
       if (!processRes.ok) throw new Error("処理の開始に失敗しました");
 
-      // Processing started - WebSocket will notify completion
+      // WebSocket で完了通知を待つ
+      onProcessingStart(
+        session.session_id,
+        (nid, url) => {
+          setStatus("idle");
+          onProcessingComplete(nid, url);
+        },
+        (msg) => {
+          setError(msg);
+          setStatus("error");
+        },
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "エラーが発生しました");
       setStatus("error");
@@ -164,7 +180,7 @@ export function UploadPanel({ idToken, onSessionCreated, onProcessingComplete: _
 
         {status === "processing" && sessionId && (
           <p className="rounded-lg bg-blue-50 px-4 py-2 text-sm text-blue-700" role="status">
-            処理中... セッションID: {sessionId}
+            AIが3Dモデルを生成中です。完了すると自動的にビューアに切り替わります（数分かかる場合があります）
           </p>
         )}
 
