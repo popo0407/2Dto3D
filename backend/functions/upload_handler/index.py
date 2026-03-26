@@ -1,0 +1,146 @@
+from __future__ import annotations
+
+import json
+import logging
+import os
+import time
+import uuid
+
+import boto3
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+SESSIONS_TABLE = os.environ.get("SESSIONS_TABLE", "")
+UPLOADS_BUCKET = os.environ.get("UPLOADS_BUCKET", "")
+
+dynamodb = boto3.resource("dynamodb")
+s3_client = boto3.client("s3")
+sqs_client = boto3.client("sqs")
+
+ALLOWED_EXTENSIONS = {".dxf", ".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".tif"}
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
+
+
+def lambda_handler(event: dict, context) -> dict:
+    http_method = event.get("httpMethod", "")
+    resource = event.get("resource", "")
+
+    if resource == "/sessions" and http_method == "POST":
+        return _create_session(event)
+    elif resource == "/sessions/{session_id}/upload" and http_method == "POST":
+        return _presigned_upload(event)
+    elif resource == "/sessions/{session_id}/process" and http_method == "POST":
+        return _start_processing(event)
+
+    return _response(400, {"error": "Invalid route"})
+
+
+def _create_session(event: dict) -> dict:
+    user_id = _get_user_id(event)
+    body = json.loads(event.get("body") or "{}")
+    project_name = body.get("project_name", "Untitled")
+
+    session_id = str(uuid.uuid4())
+    now = int(time.time())
+
+    item = {
+        "session_id": session_id,
+        "user_id": user_id,
+        "project_name": project_name,
+        "status": "UPLOADING",
+        "current_node_id": "",
+        "input_files": [],
+        "created_at": now,
+        "updated_at": now,
+        "ttl": now + 90 * 86400,
+    }
+
+    table = dynamodb.Table(SESSIONS_TABLE)
+    table.put_item(Item=item)
+
+    logger.info("Session created: %s", session_id)
+    return _response(201, item)
+
+
+def _presigned_upload(event: dict) -> dict:
+    session_id = event["pathParameters"]["session_id"]
+    body = json.loads(event.get("body") or "{}")
+    filename: str = body.get("filename", "")
+
+    ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext not in ALLOWED_EXTENSIONS:
+        return _response(400, {"error": f"Unsupported file type: {ext}"})
+
+    s3_key = f"{session_id}/{uuid.uuid4()}{ext}"
+
+    presigned = s3_client.generate_presigned_url(
+        "put_object",
+        Params={
+            "Bucket": UPLOADS_BUCKET,
+            "Key": s3_key,
+            "ContentType": body.get("content_type", "application/octet-stream"),
+        },
+        ExpiresIn=600,
+    )
+
+    # Register file in session
+    table = dynamodb.Table(SESSIONS_TABLE)
+    table.update_item(
+        Key={"session_id": session_id},
+        UpdateExpression="SET input_files = list_append(if_not_exists(input_files, :empty), :file), updated_at = :now",
+        ExpressionAttributeValues={
+            ":file": [s3_key],
+            ":empty": [],
+            ":now": int(time.time()),
+        },
+    )
+
+    logger.info("Presigned URL generated for session %s: %s", session_id, s3_key)
+    return _response(200, {"upload_url": presigned, "s3_key": s3_key})
+
+
+def _start_processing(event: dict) -> dict:
+    session_id = event["pathParameters"]["session_id"]
+
+    table = dynamodb.Table(SESSIONS_TABLE)
+    table.update_item(
+        Key={"session_id": session_id},
+        UpdateExpression="SET #s = :status, updated_at = :now",
+        ExpressionAttributeNames={"#s": "status"},
+        ExpressionAttributeValues={
+            ":status": "PROCESSING",
+            ":now": int(time.time()),
+        },
+    )
+
+    queue_url = os.environ.get("PROCESSING_QUEUE_URL", "")
+    if queue_url:
+        sqs_client.send_message(
+            QueueUrl=queue_url,
+            MessageBody=json.dumps({"session_id": session_id}),
+        )
+
+    logger.info("Processing started for session %s", session_id)
+    return _response(200, {"session_id": session_id, "status": "PROCESSING"})
+
+
+def _get_user_id(event: dict) -> str:
+    claims = (
+        event.get("requestContext", {})
+        .get("authorizer", {})
+        .get("claims", {})
+    )
+    return claims.get("sub", "anonymous")
+
+
+def _response(status_code: int, body: dict) -> dict:
+    return {
+        "statusCode": status_code,
+        "headers": {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Content-Type,Authorization",
+        },
+        "body": json.dumps(body, default=str),
+    }
