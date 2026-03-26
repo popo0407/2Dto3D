@@ -114,7 +114,12 @@ class PipelineStack(Stack):
         validate_fn = pipeline_lambda("validate_handler", timeout_seconds=60)
 
         # Step 6: Notify handler
-        notify_fn = pipeline_lambda("notify_handler", timeout_seconds=30, memory_mb=256)
+        notify_fn = pipeline_lambda(
+            "notify_handler",
+            timeout_seconds=30,
+            memory_mb=256,
+            extra_env={"WEBSOCKET_API_ID": websocket_api.api_id},
+        )
         connections_table.grant_read_data(notify_fn)
         notify_fn.add_to_role_policy(
             iam.PolicyStatement(

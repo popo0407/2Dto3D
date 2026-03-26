@@ -1,9 +1,14 @@
 import { Canvas } from "@react-three/fiber";
-import { OrbitControls, Stage, Grid } from "@react-three/drei";
+import { OrbitControls, Stage, Grid, useGLTF } from "@react-three/drei";
 import { Suspense } from "react";
 
 interface Viewer3DProps {
   gltfUrl: string;
+}
+
+function GltfModel({ url }: { url: string }) {
+  const { scene } = useGLTF(url);
+  return <primitive object={scene} />;
 }
 
 function ModelPlaceholder() {
@@ -15,7 +20,7 @@ function ModelPlaceholder() {
   );
 }
 
-export function Viewer3D({ gltfUrl: _gltfUrl }: Viewer3DProps) {
+export function Viewer3D({ gltfUrl }: Viewer3DProps) {
   return (
     <div className="relative h-full w-full bg-gray-900" role="img" aria-label="3Dモデルビューア">
       <Canvas
@@ -24,7 +29,7 @@ export function Viewer3D({ gltfUrl: _gltfUrl }: Viewer3DProps) {
       >
         <Suspense fallback={null}>
           <Stage environment="city" intensity={0.5}>
-            <ModelPlaceholder />
+            {gltfUrl ? <GltfModel url={gltfUrl} /> : <ModelPlaceholder />}
           </Stage>
         </Suspense>
         <OrbitControls makeDefault />
@@ -43,6 +48,11 @@ export function Viewer3D({ gltfUrl: _gltfUrl }: Viewer3DProps) {
       <div className="absolute bottom-4 left-4 rounded bg-gray-800/80 px-3 py-1.5 text-xs text-gray-300">
         マウスドラッグ: 回転 / スクロール: ズーム / 右クリック: パン
       </div>
+      {!gltfUrl && (
+        <div className="absolute inset-0 flex items-center justify-center">
+          <p className="text-sm text-gray-400">3Dモデルを生成すると表示されます</p>
+        </div>
+      )}
     </div>
   );
 }

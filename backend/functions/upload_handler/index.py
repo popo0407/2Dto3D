@@ -7,15 +7,27 @@ import time
 import uuid
 
 import boto3
+from botocore.config import Config
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 SESSIONS_TABLE = os.environ.get("SESSIONS_TABLE", "")
 UPLOADS_BUCKET = os.environ.get("UPLOADS_BUCKET", "")
+AWS_REGION = os.environ.get("AWS_REGION", "ap-northeast-1")
 
 dynamodb = boto3.resource("dynamodb")
-s3_client = boto3.client("s3")
+# SigV4 + 仮想ホスト形式で署名することでリージョン固有エンドポイントURLを生成する。
+# グローバルエンドポイント (s3.amazonaws.com) を使うと CORS プリフライトが
+# バケットのリージョンへリダイレクトされず 500 になるため明示的に指定する。
+s3_client = boto3.client(
+    "s3",
+    region_name=AWS_REGION,
+    config=Config(
+        signature_version="s3v4",
+        s3={"addressing_style": "virtual"},
+    ),
+)
 sqs_client = boto3.client("sqs")
 
 ALLOWED_EXTENSIONS = {".dxf", ".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".tif"}

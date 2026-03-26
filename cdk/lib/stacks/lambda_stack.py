@@ -130,6 +130,20 @@ class LambdaStack(Stack):
         )
         connections_table.grant_read_write_data(ws_disconnect_fn)
 
+        ws_default_fn = lambda_.Function(
+            self,
+            "WsDefaultFunction",
+            function_name=f"{project_name}-{env_name}-ws-default",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="index.default_handler",
+            code=lambda_.Code.from_asset("../backend/functions/ws_handler"),
+            layers=[common_layer],
+            timeout=Duration.seconds(10),
+            memory_size=128,
+            environment=common_env,
+        )
+        connections_table.grant_read_write_data(ws_default_fn)
+
         self.websocket_api = apigwv2.WebSocketApi(
             self,
             "WebSocketApi",
@@ -142,6 +156,11 @@ class LambdaStack(Stack):
             disconnect_route_options=apigwv2.WebSocketRouteOptions(
                 integration=integrations_v2.WebSocketLambdaIntegration(
                     "DisconnectIntegration", ws_disconnect_fn
+                ),
+            ),
+            default_route_options=apigwv2.WebSocketRouteOptions(
+                integration=integrations_v2.WebSocketLambdaIntegration(
+                    "DefaultIntegration", ws_default_fn
                 ),
             ),
         )
