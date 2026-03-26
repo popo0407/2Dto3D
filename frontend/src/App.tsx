@@ -5,13 +5,13 @@ import { ChatPanel } from "./components/ChatPanel";
 import { HistoryPanel } from "./components/HistoryPanel";
 import { LoginPanel } from "./components/LoginPanel";
 import { getIdToken, signOut } from "./auth";
-import { WS_URL } from "./config";
+import { WS_URL, API_BASE } from "./config";
 
 type AppView = "upload" | "viewer";
 
 // WebSocket から届く通知メッセージの型
 interface WsNotifyMessage {
-  type: "PROCESSING_COMPLETE" | "PROCESSING_FAILED" | "PROGRESS" | string;
+  type: "PROCESSING_COMPLETE" | "PROCESSING_FAILED" | "PROGRESS" | "AI_QUESTION" | string;
   session_id?: string;
   node_id?: string;
   gltf_url?: string;
@@ -19,6 +19,15 @@ interface WsNotifyMessage {
   step?: string;
   progress?: number;
   message?: string;
+  questions?: AiQuestion[];
+}
+
+interface AiQuestion {
+  id: string;
+  feature_id?: string;
+  text: string;
+  confidence?: number;
+  priority?: "high" | "medium" | "low";
 }
 
 export default function App() {
@@ -29,6 +38,8 @@ export default function App() {
   const [idToken, setIdToken] = useState<string>("");
   const [processingStep, setProcessingStep] = useState<string>("");
   const [processingProgress, setProcessingProgress] = useState<number>(0);
+  const [confidenceMap, setConfidenceMap] = useState<Record<string, number>>({});
+  const [aiQuestions, setAiQuestions] = useState<AiQuestion[]>([]);
 
   // WebSocket ref（セッションをまたいで保持）
   const wsRef = useRef<WebSocket | null>(null);
@@ -56,7 +67,9 @@ export default function App() {
             if (msg.type === "PROGRESS") {
               setProcessingStep(msg.step ?? "");
               setProcessingProgress(msg.progress ?? 0);
-            } else if (msg.type === "PROCESSING_COMPLETE" && msg.node_id && msg.gltf_url) {
+            } else if (msg.type === "AI_QUESTION" && msg.questions?.length) {
+            setAiQuestions(msg.questions);
+          } else if (msg.type === "PROCESSING_COMPLETE" && msg.node_id && msg.gltf_url) {
               setProcessingProgress(100);
               ws.close();
               onComplete(msg.node_id, msg.gltf_url);
@@ -78,6 +91,31 @@ export default function App() {
     [],
   );
 
+  /** チャット編集後、新 node_id で WebSocket を再接続してパイプライン完了を待つ */
+  const handleChatNodeCreated = useCallback(
+    (sid: string, _newNodeId: string) => {
+      setProcessingStep("BUILDING");
+      setProcessingProgress(55);
+      setView("viewer");
+      handleProcessingStart(
+        sid,
+        (completedNodeId, url) => {
+          setNodeId(completedNodeId);
+          setGltfUrl(url);
+          setProcessingStep("");
+          setProcessingProgress(0);
+          _fetchNodeConfidenceMap(completedNodeId, sid, idToken, setConfidenceMap);
+        },
+        (err) => {
+          console.error("Chat pipeline failed:", err);
+          setProcessingStep("");
+          setProcessingProgress(0);
+        },
+      );
+    },
+    [handleProcessingStart, idToken],
+  );
+
   const handleLoginSuccess = async () => {
     const token = await getIdToken();
     setIdToken(token ?? "");
@@ -92,6 +130,8 @@ export default function App() {
     setGltfUrl("");
     setProcessingStep("");
     setProcessingProgress(0);
+    setConfidenceMap({});
+    setAiQuestions([]);
     setView("upload");
   };
 
@@ -107,6 +147,7 @@ export default function App() {
     setNodeId(nid);
     setGltfUrl(url);
     setView("viewer");
+    _fetchNodeConfidenceMap(nid, sessionId, idToken, setConfidenceMap);
   };
 
   return (
@@ -164,10 +205,40 @@ export default function App() {
         ) : (
           <>
             <section className="flex flex-1 flex-col" aria-label="3Dビューア">
-              <Viewer3D gltfUrl={gltfUrl} />
+              <Viewer3D gltfUrl={gltfUrl} confidenceMap={confidenceMap} />
             </section>
             <aside className="flex w-80 flex-col border-l bg-white" aria-label="サイドパネル">
-              <ChatPanel sessionId={sessionId} nodeId={nodeId} idToken={idToken} />
+              {aiQuestions.length > 0 && (
+                <div
+                  className="border-b bg-amber-50 px-4 py-3"
+                  role="alert"
+                  aria-label="AIからの質問"
+                >
+                  <p className="mb-2 text-xs font-semibold text-amber-700">
+                    ⚠ AI が確認を求めています
+                  </p>
+                  <ul className="space-y-1">
+                    {aiQuestions.map((q) => (
+                      <li key={q.id} className="text-xs text-amber-800">
+                        <span className="font-medium">[{q.feature_id ?? q.id}]</span> {q.text}
+                      </li>
+                    ))}
+                  </ul>
+                  <button
+                    type="button"
+                    onClick={() => setAiQuestions([])}
+                    className="mt-2 text-xs text-amber-600 underline hover:text-amber-800"
+                  >
+                    閉じる
+                  </button>
+                </div>
+              )}
+              <ChatPanel
+                sessionId={sessionId}
+                nodeId={nodeId}
+                idToken={idToken}
+                onChatNodeCreated={(newNodeId) => handleChatNodeCreated(sessionId, newNodeId)}
+              />
               <HistoryPanel sessionId={sessionId} onNodeSelect={setNodeId} idToken={idToken} />
             </aside>
           </>
@@ -175,4 +246,26 @@ export default function App() {
       </main>
     </div>
   );
+}
+
+/** ノードの確度マップを API から取得して set する */
+async function _fetchNodeConfidenceMap(
+  nodeId: string,
+  sessionId: string,
+  idToken: string,
+  setter: (map: Record<string, number>) => void,
+): Promise<void> {
+  if (!nodeId || !sessionId) return;
+  try {
+    const res = await fetch(`${API_BASE}/sessions/${sessionId}/nodes/${nodeId}`, {
+      headers: { Authorization: `Bearer ${idToken}` },
+    });
+    if (!res.ok) return;
+    const data = (await res.json()) as { confidence_map?: Record<string, number> };
+    if (data.confidence_map && Object.keys(data.confidence_map).length > 0) {
+      setter(data.confidence_map);
+    }
+  } catch {
+    // サイレント無視（表示機能なので処理を止めない）
+  }
 }

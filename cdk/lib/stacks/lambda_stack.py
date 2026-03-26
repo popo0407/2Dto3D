@@ -105,7 +105,18 @@ class LambdaStack(Stack):
 
         history_fn = create_function("history_handler")
 
-        chat_fn = create_function("chat_handler", timeout_seconds=60, memory_mb=512)
+        chat_fn = create_function(
+            "chat_handler",
+            timeout_seconds=60,
+            memory_mb=512,
+            extra_env={"PROCESSING_QUEUE_URL": _queue_url},
+        )
+        chat_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["sqs:SendMessage"],
+                resources=[_queue_arn],
+            )
+        )
         if not use_mock_ai:
             chat_fn.add_to_role_policy(
                 iam.PolicyStatement(

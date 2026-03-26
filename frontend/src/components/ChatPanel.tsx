@@ -5,6 +5,8 @@ interface ChatPanelProps {
   sessionId: string;
   nodeId: string;
   idToken: string;
+  /** チャット送信後、パイプライン再実行のために新 nodeId を親へ通知する */
+  onChatNodeCreated?: (newNodeId: string) => void;
 }
 
 interface ChatMessage {
@@ -12,7 +14,7 @@ interface ChatMessage {
   content: string;
 }
 
-export function ChatPanel({ sessionId, nodeId, idToken }: ChatPanelProps) {
+export function ChatPanel({ sessionId, nodeId, idToken, onChatNodeCreated }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -41,9 +43,16 @@ export function ChatPanel({ sessionId, nodeId, idToken }: ChatPanelProps) {
         ...prev,
         {
           role: "assistant",
-          content: data.diff_patch || "モデルを更新しました。",
+          content: data.diff_patch
+            ? `✅ ${data.diff_patch}\n\n3Dモデルを再生成中...`
+            : "モデルを更新しました。再生成中...",
         },
       ]);
+
+      // 新 node_id をパイプライン再実行のために親へ通知
+      if (data.node_id && onChatNodeCreated) {
+        onChatNodeCreated(data.node_id);
+      }
     } catch {
       setMessages((prev) => [
         ...prev,

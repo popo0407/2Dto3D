@@ -34,6 +34,18 @@ def lambda_handler(event: dict, context) -> dict:
     """
     session_id = event["session_id"]
     logger.info("Parsing session %s", session_id)
+
+    # チャット編集による再実行: parse/AI を省略して既存 node をそのまま次ステップへ渡す
+    if event.get("restart_from_cadquery"):
+        node_id = event["node_id"]
+        logger.info("restart_from_cadquery=True — skipping parse for node %s", node_id)
+        return {
+            "session_id": session_id,
+            "node_id": node_id,
+            "parsed_data": {"files": [], "image_keys": [], "file_count": 0},
+            "restart_from_cadquery": True,
+        }
+
     send_progress(session_id, "PARSING", 10, "ファイルを解析中...")
 
     # Fetch session from DynamoDB
