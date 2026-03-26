@@ -2,6 +2,7 @@ import { useState, useCallback } from "react";
 import { API_BASE } from "../config";
 
 interface UploadPanelProps {
+  idToken: string;
   onSessionCreated: (sessionId: string) => void;
   onProcessingComplete: (nodeId: string, gltfUrl: string) => void;
 }
@@ -10,7 +11,9 @@ type UploadStatus = "idle" | "uploading" | "processing" | "error";
 
 const ALLOWED_EXTENSIONS = [".dxf", ".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".tif"];
 
-export function UploadPanel({ onSessionCreated, onProcessingComplete: _onComplete }: UploadPanelProps) {
+export function UploadPanel({ idToken, onSessionCreated, onProcessingComplete: _onComplete }: UploadPanelProps) {
+  const authHeader = { Authorization: `Bearer ${idToken}` };
+
   const [status, setStatus] = useState<UploadStatus>("idle");
   const [projectName, setProjectName] = useState("");
   const [files, setFiles] = useState<File[]>([]);
@@ -44,7 +47,7 @@ export function UploadPanel({ onSessionCreated, onProcessingComplete: _onComplet
       // 1. Create session
       const sessionRes = await fetch(`${API_BASE}/sessions`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeader },
         body: JSON.stringify({ project_name: projectName || "Untitled" }),
       });
       if (!sessionRes.ok) throw new Error("セッション作成に失敗しました");
@@ -59,7 +62,7 @@ export function UploadPanel({ onSessionCreated, onProcessingComplete: _onComplet
           `${API_BASE}/sessions/${session.session_id}/upload`,
           {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { "Content-Type": "application/json", ...authHeader },
             body: JSON.stringify({
               filename: file.name,
               content_type: file.type || "application/octet-stream",
@@ -82,7 +85,7 @@ export function UploadPanel({ onSessionCreated, onProcessingComplete: _onComplet
       setStatus("processing");
       const processRes = await fetch(
         `${API_BASE}/sessions/${session.session_id}/process`,
-        { method: "POST" },
+        { method: "POST", headers: authHeader },
       );
       if (!processRes.ok) throw new Error("処理の開始に失敗しました");
 

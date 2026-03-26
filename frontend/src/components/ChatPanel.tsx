@@ -4,6 +4,7 @@ import { API_BASE } from "../config";
 interface ChatPanelProps {
   sessionId: string;
   nodeId: string;
+  idToken: string;
 }
 
 interface ChatMessage {
@@ -11,7 +12,7 @@ interface ChatMessage {
   content: string;
 }
 
-export function ChatPanel({ sessionId, nodeId }: ChatPanelProps) {
+export function ChatPanel({ sessionId, nodeId, idToken }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -29,7 +30,7 @@ export function ChatPanel({ sessionId, nodeId }: ChatPanelProps) {
         `${API_BASE}/sessions/${sessionId}/nodes/${nodeId}/chat`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
           body: JSON.stringify({ message: userMessage }),
         },
       );

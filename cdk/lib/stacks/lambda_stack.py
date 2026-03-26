@@ -172,61 +172,62 @@ class LambdaStack(Stack):
             "CognitoAuthorizer",
             cognito_user_pools=[user_pool],
         )
+        auth_kwargs: dict = {"authorizer": authorizer}
 
         sessions_resource = rest_api.root.add_resource("sessions")
         sessions_resource.add_method(
-            "POST", apigw.LambdaIntegration(upload_fn), authorizer=authorizer
+            "POST", apigw.LambdaIntegration(upload_fn), **auth_kwargs
         )
         sessions_resource.add_method(
-            "GET", apigw.LambdaIntegration(history_fn), authorizer=authorizer
+            "GET", apigw.LambdaIntegration(history_fn), **auth_kwargs
         )
 
         session_resource = sessions_resource.add_resource("{session_id}")
         session_resource.add_method(
-            "GET", apigw.LambdaIntegration(history_fn), authorizer=authorizer
+            "GET", apigw.LambdaIntegration(history_fn), **auth_kwargs
         )
         session_resource.add_method(
-            "DELETE", apigw.LambdaIntegration(history_fn), authorizer=authorizer
+            "DELETE", apigw.LambdaIntegration(history_fn), **auth_kwargs
         )
 
         upload_resource = session_resource.add_resource("upload")
         upload_resource.add_method(
-            "POST", apigw.LambdaIntegration(upload_fn), authorizer=authorizer
+            "POST", apigw.LambdaIntegration(upload_fn), **auth_kwargs
         )
 
         process_resource = session_resource.add_resource("process")
         process_resource.add_method(
-            "POST", apigw.LambdaIntegration(upload_fn), authorizer=authorizer
+            "POST", apigw.LambdaIntegration(upload_fn), **auth_kwargs
         )
 
         nodes_resource = session_resource.add_resource("nodes")
         nodes_resource.add_method(
-            "GET", apigw.LambdaIntegration(history_fn), authorizer=authorizer
+            "GET", apigw.LambdaIntegration(history_fn), **auth_kwargs
         )
 
         node_resource = nodes_resource.add_resource("{node_id}")
         node_resource.add_method(
-            "GET", apigw.LambdaIntegration(history_fn), authorizer=authorizer
+            "GET", apigw.LambdaIntegration(history_fn), **auth_kwargs
         )
 
         chat_resource = node_resource.add_resource("chat")
         chat_resource.add_method(
-            "POST", apigw.LambdaIntegration(chat_fn), authorizer=authorizer
+            "POST", apigw.LambdaIntegration(chat_fn), **auth_kwargs
         )
 
         revert_resource = node_resource.add_resource("revert")
         revert_resource.add_method(
-            "POST", apigw.LambdaIntegration(history_fn), authorizer=authorizer
+            "POST", apigw.LambdaIntegration(history_fn), **auth_kwargs
         )
 
         download_resource = node_resource.add_resource("download")
         download_resource.add_method(
-            "GET", apigw.LambdaIntegration(history_fn), authorizer=authorizer
+            "GET", apigw.LambdaIntegration(history_fn), **auth_kwargs
         )
 
         validate_resource = node_resource.add_resource("validate")
         validate_resource.add_method(
-            "GET", apigw.LambdaIntegration(history_fn), authorizer=authorizer
+            "GET", apigw.LambdaIntegration(history_fn), **auth_kwargs
         )
 
         CfnOutput(self, "RestApiUrl", value=rest_api.url)

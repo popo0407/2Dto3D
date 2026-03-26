@@ -3,6 +3,8 @@ import { Viewer3D } from "./components/Viewer3D";
 import { UploadPanel } from "./components/UploadPanel";
 import { ChatPanel } from "./components/ChatPanel";
 import { HistoryPanel } from "./components/HistoryPanel";
+import { LoginPanel } from "./components/LoginPanel";
+import { getIdToken, signOut } from "./auth";
 
 type AppView = "upload" | "viewer";
 
@@ -11,6 +13,25 @@ export default function App() {
   const [sessionId, setSessionId] = useState<string>("");
   const [nodeId, setNodeId] = useState<string>("");
   const [gltfUrl, setGltfUrl] = useState<string>("");
+  const [idToken, setIdToken] = useState<string>("");
+
+  const handleLoginSuccess = async () => {
+    const token = await getIdToken();
+    setIdToken(token ?? "");
+  };
+
+  const handleSignOut = () => {
+    signOut();
+    setIdToken("");
+    setSessionId("");
+    setNodeId("");
+    setGltfUrl("");
+    setView("upload");
+  };
+
+  if (!idToken) {
+    return <LoginPanel onLoginSuccess={handleLoginSuccess} />;
+  }
 
   const handleSessionCreated = (id: string) => {
     setSessionId(id);
@@ -28,7 +49,7 @@ export default function App() {
         <h1 className="text-lg font-semibold text-gray-900">
           2D to 3D AI 変換
         </h1>
-        <nav className="ml-auto flex gap-2" role="navigation" aria-label="メイン">
+        <nav className="ml-auto flex items-center gap-2" role="navigation" aria-label="メイン">
           <button
             type="button"
             onClick={() => setView("upload")}
@@ -54,12 +75,20 @@ export default function App() {
           >
             3Dビューア
           </button>
+          <button
+            type="button"
+            onClick={handleSignOut}
+            className="ml-4 rounded-md px-3 py-1.5 text-sm font-medium text-gray-500 hover:bg-gray-100"
+          >
+            ログアウト
+          </button>
         </nav>
       </header>
 
       <main className="flex flex-1 overflow-hidden">
         {view === "upload" ? (
           <UploadPanel
+            idToken={idToken}
             onSessionCreated={handleSessionCreated}
             onProcessingComplete={handleProcessingComplete}
           />
@@ -69,8 +98,8 @@ export default function App() {
               <Viewer3D gltfUrl={gltfUrl} />
             </section>
             <aside className="flex w-80 flex-col border-l bg-white" aria-label="サイドパネル">
-              <ChatPanel sessionId={sessionId} nodeId={nodeId} />
-              <HistoryPanel sessionId={sessionId} onNodeSelect={setNodeId} />
+              <ChatPanel sessionId={sessionId} nodeId={nodeId} idToken={idToken} />
+              <HistoryPanel sessionId={sessionId} onNodeSelect={setNodeId} idToken={idToken} />
             </aside>
           </>
         )}
