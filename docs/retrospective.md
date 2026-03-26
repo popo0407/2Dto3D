@@ -78,6 +78,24 @@
 ### 改善策・再発防止
 - WebSocket APIを使う場合は `$connect`・`$disconnect`・`$default` の3ルートすべてを必ず CDK で登録する
 - SFn の最終ステップ (Notify) が送受信するメッセージ型・フィールド名はフロントエンドと事前に定義し、コード生成時に一致させる
+
+---
+
+## 2026-03 進捗0%スタック バグ修正
+
+### 実施内容
+- WebSocket接続後、進捗が0%から動かない問題を調査・修正
+
+### 発生した問題と対処
+
+| 問題 | 原因 | 対処 |
+|------|------|------|
+| Step Functions Step2以降が全て失敗 | `pipeline_stack.py` の `LambdaInvoke` が `result_path="$.xxx_result"` を使用していたため、Lambda戻り値が `{Payload: {...}, StatusCode: 200}` でラップされて格納された。次ステップの `event["node_id"]` がトップレベルに存在せず KeyError で即失敗 | 全 LambdaInvoke に `payload_response_only=True` と `result_path="$"` を設定し、Lambda戻り値が状態全体を上書きするよう修正 |
+| 初期PARSING(10%)通知を取りこぼす | `UploadPanel.tsx` が `/process` 呼び出し後にWebSocket接続を開く実装だったため、SQS処理が速い場合にWS接続前に通知が飛びDynamoDBに接続レコードが存在せず通知が捨てられた | `handleProcessingStart` が WebSocket 接続確立後に resolve する `Promise<void>` を返すよう変更し、UploadPanel で await してから `/process` を呼ぶよう修正 |
+
+### 改善策・再発防止
+- CDK Step Functions の `LambdaInvoke` は **必ず `payload_response_only=True`** を指定する。デフォルトでは `{Payload, StatusCode, ExecutedVersion}` のラッパーが付くため、次ステップの Lambda が直接フィールドを参照できなくなる
+- 非同期処理の通知を受け取るWebSocket接続は、処理起動より**前**に確立・登録しておく（先にWSを開いてから処理をキックする順序を徹底する）
 - `boto3.client("s3")` は明示的に `region_name` と `config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"})` を設定する（特に署名付きURL生成時）
 - React Three Fiber では `useGLTF` フックを含む `@react-three/drei` コンポーネントは `<Suspense>` の内側に配置する必要がある
 - CDK でパイプラインのLambdaに渡す環境変数（APIのIDなど）は、依存スタックのエクスポート値を `extra_env` で明示的に渡し、実装コードではすべて環境変数から読み取る
