@@ -190,18 +190,22 @@ class PipelineStack(Stack):
         )
 
         # ---------- Step Functions ----------
+        # payload_response_only=True: Lambda の戻り値のみ取得（StatusCode等のラッパーを除去）
+        # result_path="$": 状態全体をLambdaの戻り値で上書き（次ステップへ session_id/node_id を正しく引き継ぐ）
         parse_step = tasks.LambdaInvoke(
             self,
             "ParseStep",
             lambda_function=parse_fn,
-            result_path="$.parse_result",
+            payload_response_only=True,
+            result_path="$",
         )
 
         ai_analyze_step = tasks.LambdaInvoke(
             self,
             "AiAnalyzeStep",
             lambda_function=ai_analyze_fn,
-            result_path="$.ai_result",
+            payload_response_only=True,
+            result_path="$",
         )
 
         cadquery_step = tasks.EcsRunTask(
@@ -236,21 +240,24 @@ class PipelineStack(Stack):
             self,
             "OptimizeStep",
             lambda_function=optimize_fn,
-            result_path="$.optimize_result",
+            payload_response_only=True,
+            result_path="$",
         )
 
         validate_step = tasks.LambdaInvoke(
             self,
             "ValidateStep",
             lambda_function=validate_fn,
-            result_path="$.validate_result",
+            payload_response_only=True,
+            result_path="$",
         )
 
         notify_step = tasks.LambdaInvoke(
             self,
             "NotifyStep",
             lambda_function=notify_fn,
-            result_path="$.notify_result",
+            payload_response_only=True,
+            result_path="$",
         )
 
         definition = (

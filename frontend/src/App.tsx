@@ -33,42 +33,47 @@ export default function App() {
   // WebSocket ref（セッションをまたいで保持）
   const wsRef = useRef<WebSocket | null>(null);
 
-  // UploadPanel から呼ばれる。処理開始後 WebSocket を接続して完了を待つ。
+  // UploadPanel から呼ばれる。WebSocket を接続して接続確立後に resolve する Promise を返す。
+  // 呼び出し元は await してから /process を呼ぶことで競合状態を防ぐ。
   const handleProcessingStart = useCallback(
-    (sid: string, onComplete: (nodeId: string, url: string) => void, onError: (msg: string) => void) => {
-      // 既存 WS があれば閉じる
-      wsRef.current?.close();
+    (sid: string, onComplete: (nodeId: string, url: string) => void, onError: (msg: string) => void): Promise<void> => {
+      return new Promise((resolve, reject) => {
+        // 既存 WS があれば閉じる
+        wsRef.current?.close();
 
-      const ws = new WebSocket(`${WS_URL}?session_id=${sid}`);
-      wsRef.current = ws;
+        const ws = new WebSocket(`${WS_URL}?session_id=${sid}`);
+        wsRef.current = ws;
 
-      ws.onopen = () => {
-        // 接続後にセッションを subscribe する
-        ws.send(JSON.stringify({ action: "subscribe", session_id: sid }));
-      };
+        ws.onopen = () => {
+          // 接続後にセッションを subscribe し、接続確立を呼び出し元へ通知
+          ws.send(JSON.stringify({ action: "subscribe", session_id: sid }));
+          resolve();
+        };
 
-      ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data as string) as WsNotifyMessage;
-          if (msg.type === "PROGRESS") {
-            setProcessingStep(msg.step ?? "");
-            setProcessingProgress(msg.progress ?? 0);
-          } else if (msg.type === "PROCESSING_COMPLETE" && msg.node_id && msg.gltf_url) {
-            setProcessingProgress(100);
-            ws.close();
-            onComplete(msg.node_id, msg.gltf_url);
-          } else if (msg.type === "PROCESSING_FAILED") {
-            ws.close();
-            onError(msg.error ?? "処理に失敗しました");
+        ws.onmessage = (event) => {
+          try {
+            const msg = JSON.parse(event.data as string) as WsNotifyMessage;
+            if (msg.type === "PROGRESS") {
+              setProcessingStep(msg.step ?? "");
+              setProcessingProgress(msg.progress ?? 0);
+            } else if (msg.type === "PROCESSING_COMPLETE" && msg.node_id && msg.gltf_url) {
+              setProcessingProgress(100);
+              ws.close();
+              onComplete(msg.node_id, msg.gltf_url);
+            } else if (msg.type === "PROCESSING_FAILED") {
+              ws.close();
+              onError(msg.error ?? "処理に失敗しました");
+            }
+          } catch {
+            // JSON parse 失敗は無視
           }
-        } catch {
-          // JSON parse 失敗は無視
-        }
-      };
+        };
 
-      ws.onerror = () => {
-        onError("WebSocket 接続エラーが発生しました");
-      };
+        ws.onerror = () => {
+          onError("WebSocket 接続エラーが発生しました");
+          reject(new Error("WebSocket 接続エラーが発生しました"));
+        };
+      });
     },
     [],
   );

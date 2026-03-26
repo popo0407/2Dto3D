@@ -9,7 +9,7 @@ interface UploadPanelProps {
     sessionId: string,
     onComplete: (nodeId: string, url: string) => void,
     onError: (msg: string) => void,
-  ) => void;
+  ) => Promise<void>;
   processingStep: string;
   processingProgress: number;
 }
@@ -96,16 +96,9 @@ export function UploadPanel({ idToken, onSessionCreated, onProcessingComplete, o
         if (!putRes.ok) throw new Error(`${file.name} のアップロードに失敗しました`);
       }
 
-      // 3. Start processing
+      // 3. WebSocket 接続を先に確立してからパイプラインを起動（競合状態防止）
       setStatus("processing");
-      const processRes = await fetch(
-        `${API_BASE}/sessions/${session.session_id}/process`,
-        { method: "POST", headers: authHeader },
-      );
-      if (!processRes.ok) throw new Error("処理の開始に失敗しました");
-
-      // WebSocket で完了通知を待つ
-      onProcessingStart(
+      await onProcessingStart(
         session.session_id,
         (nid, url) => {
           setStatus("idle");
@@ -116,6 +109,13 @@ export function UploadPanel({ idToken, onSessionCreated, onProcessingComplete, o
           setStatus("error");
         },
       );
+
+      // 4. WebSocket 接続確立後に処理を開始
+      const processRes = await fetch(
+        `${API_BASE}/sessions/${session.session_id}/process`,
+        { method: "POST", headers: authHeader },
+      );
+      if (!processRes.ok) throw new Error("処理の開始に失敗しました");
     } catch (err) {
       setError(err instanceof Error ? err.message : "エラーが発生しました");
       setStatus("error");
