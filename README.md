@@ -94,3 +94,17 @@ cd backend
 PYTHONPATH=. pytest tests/ -v
 # 33 tests passed (upload, history, parse, ws, models, script_validator)
 ```
+
+## デプロイ済みエンドポイント（dev環境）
+
+| リソース | URL |
+|---------|-----|
+| フロントエンド (CloudFront) | https://d3azdxpj50obab.cloudfront.net |
+| REST API (API Gateway) | https://ussu5ebma6.execute-api.ap-northeast-1.amazonaws.com/dev/ |
+| WebSocket API | wss://mwrah9ladf.execute-api.ap-northeast-1.amazonaws.com/dev |
+| Cognito User Pool ID | ap-northeast-1_omw6GCY4N |
+| Cognito Client ID | dp651lflea1qhav7eqpbhlijp |
+| SQS Queue | https://sqs.ap-northeast-1.amazonaws.com/590184009554/2dto3d-dev-processing-queue |
+| Step Functions | 2dto3d-dev-cad-pipeline |
+
+> AWSアカウント: 590184009554 / リージョン: ap-northeast-1 / 環境: dev (useMockAI=true)

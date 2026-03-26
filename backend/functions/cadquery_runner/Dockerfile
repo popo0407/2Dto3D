@@ -1,8 +1,9 @@
 FROM python:3.12-slim
 
 # Install system dependencies for CadQuery/OpenCASCADE
+# libgl1-mesa-glx was removed in Debian trixie; use libgl1 instead
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1-mesa-glx \
+    libgl1 \
     libglu1-mesa \
     libxrender1 \
     libxcursor1 \
