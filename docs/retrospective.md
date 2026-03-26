@@ -24,3 +24,32 @@
 - CDK Stack名は常にアルファベット先頭にする
 - CDK API のパラメータは公式ドキュメントと `help()` で確認する
 - React Three Fiber のサポートバージョンを確認してからReactバージョンを決定する
+
+---
+
+## 2026-03 デプロイ作業
+
+### 実施内容
+- AWS account 590184009554 / ap-northeast-1 へ dev 環境デプロイ
+- 全6 CDK スタックのデプロイ成功
+- フロントエンドビルド (dist/) → S3 アップロード → CloudFront キャッシュ無効化
+
+### 発生した問題と対処
+
+| 問題 | 原因 | 対処 |
+|------|------|------|
+| `libgl1-mesa-glx` がインストール不可 | Debian trixie (`python:3.12-slim` 最新ベース) で `libgl1-mesa-glx` が廃止された | `libgl1` に差し替え（同等のOpenGL共有ライブラリ） |
+| `Cad2d3d-dev-lambda/pipeline` で `ExpiredToken` | SSOセッションの一時認証情報が CDK デプロイ途中（database/auth/network 完了後）に有効期限切れ | 認証情報を再取得して残り2スタックのみ再デプロイ |
+
+### デプロイ済みリソース（dev環境）
+| リソース | 値 |
+|---------|-----|
+| CloudFront URL | https://d3azdxpj50obab.cloudfront.net |
+| REST API URL | https://ussu5ebma6.execute-api.ap-northeast-1.amazonaws.com/dev/ |
+| WebSocket URL | wss://mwrah9ladf.execute-api.ap-northeast-1.amazonaws.com/dev |
+| Cognito User Pool | ap-northeast-1_omw6GCY4N |
+
+### 改善策・再発防止
+- Debian trixie 以降では `libgl1-mesa-glx` の代わりに `libgl1` を使用する
+- 長時間の CDK デプロイ（複数スタック）では SSO トークンの有効期限（通常1〜8時間）に注意し、期限内に完了できるか事前確認する
+- 認証情報が切れた場合は `cdk deploy <StackName>` で失敗したスタックのみ再デプロイ可能
