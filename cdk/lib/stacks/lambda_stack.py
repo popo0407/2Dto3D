@@ -84,7 +84,22 @@ class LambdaStack(Stack):
             nodes_table.grant_read_write_data(fn)
             return fn
 
-        upload_fn = create_function("upload_handler")
+        # Queue name is deterministic — avoids circular cross-stack reference
+        # (pipeline_stack already depends on lambda_stack for websocket_api)
+        _queue_name = f"{project_name}-{env_name}-processing-queue"
+        _queue_url = f"https://sqs.{self.region}.amazonaws.com/{self.account}/{_queue_name}"
+        _queue_arn = f"arn:aws:sqs:{self.region}:{self.account}:{_queue_name}"
+
+        upload_fn = create_function(
+            "upload_handler",
+            extra_env={"PROCESSING_QUEUE_URL": _queue_url},
+        )
+        upload_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["sqs:SendMessage"],
+                resources=[_queue_arn],
+            )
+        )
         uploads_bucket.grant_put(upload_fn)
         uploads_bucket.grant_read(upload_fn)
 
