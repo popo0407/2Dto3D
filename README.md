@@ -108,3 +108,16 @@ PYTHONPATH=. pytest tests/ -v
 | Step Functions | 2dto3d-dev-cad-pipeline |
 
 > AWSアカウント: 590184009554 / リージョン: ap-northeast-1 / 環境: dev (useMockAI=true)
+
+## 修正履歴
+
+| 日付 | 修正内容 |
+|------|---------|
+| 2026-03 | CloudFront /api 403 → `config.ts` API URL ハードコードフォールバック |
+| 2026-03 | S3 CORS OPTIONS 500 → `upload_handler` SigV4 + リージョン指定 |
+| 2026-03 | 処理完了通知未着 → App.tsx WebSocket 接続 + `PROCESSING_COMPLETE` ハンドリング |
+| 2026-03 | `ws_handler` セッション未紐付け → `session_id` 保存 + `default_handler` 追加 |
+| 2026-03 | `notify_handler` メッセージ型不一致・`gltf_url` 欠如 → `PROCESSING_COMPLETE` + 署名付き URL |
+| 2026-03 | WebSocket `$default` ルート欠如 → `ws_default_fn` Lambda + CDK ルート登録 |
+| 2026-03 | `notify_fn` に `WEBSOCKET_API_ID` 未渡し → `pipeline_stack` の `extra_env` に追加 |
+| 2026-03 | `Viewer3D.tsx` が glTF を描画しない → `useGLTF` による実 glTF ロード実装 |

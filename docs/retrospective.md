@@ -53,3 +53,31 @@
 - Debian trixie 以降では `libgl1-mesa-glx` の代わりに `libgl1` を使用する
 - 長時間の CDK デプロイ（複数スタック）では SSO トークンの有効期限（通常1〜8時間）に注意し、期限内に完了できるか事前確認する
 - 認証情報が切れた場合は `cdk deploy <StackName>` で失敗したスタックのみ再デプロイ可能
+
+---
+
+## 2026-03 バグ修正（実機テスト後）
+
+### 実施内容
+- テストユーザーでのE2E通しテストにより3件の実行時バグを発見・修正
+- コード総合レビューにより5件の実装欠如（ダミーコード）を修正
+
+### 発生した問題と対処
+
+| 問題 | 原因 | 対処 |
+|------|------|------|
+| CloudFront `/api/*` で 403 | `VITE_API_BASE` 未設定時のフォールバックが `/api` で、CloudFront に `/api/*` ビヘイビアなし | `config.ts` に REST API URL をハードコードフォールバックとして設定 |
+| S3 署名付きURLへの OPTIONS リクエストで 500 | `boto3.client("s3")` がグローバルエンドポイントを使用し SigV4 未適用 | `region_name`・`signature_version="s3v4"`・`addressing_style="virtual"` を明示 |
+| 処理完了後も画面が「処理中」のまま | WebSocket 完了通知フローが未実装 | App.tsx でWebSocket接続 + `PROCESSING_COMPLETE` 受信処理を実装 |
+| notify_handler が接続を発見できない | `user_id="anonymous"` で検索していたが WebSocket 接続に `user_id` は格納されていない | `session_id` で接続テーブルをスキャンするように変更 |
+| notify_handler のメッセージ型不一致 | Lambda が `"pipeline_complete"` を送信し、フロントが `"PROCESSING_COMPLETE"` を期待 | Lambda 送信型を `"PROCESSING_COMPLETE"` に統一 |
+| 処理完了後も 3D ビューアが空白 | `Viewer3D.tsx` が `gltfUrl` プロパティを `_gltfUrl` として受け取り完全に無視していた | `useGLTF` フックを使用した `GltfModel` コンポーネントを実装 |
+| WebSocket `$default` ルートが存在しない | CDK で `default_route_options` を指定し忘れていた | `ws_default_fn` Lambda と `$default` ルートを lambda_stack.py に追加 |
+| notify_fn に `WEBSOCKET_API_ID` が渡されない | pipeline_stack の `pipeline_lambda()` 呼び出しで `extra_env` を指定し忘れていた | `extra_env={"WEBSOCKET_API_ID": websocket_api.api_id}` を追加 |
+
+### 改善策・再発防止
+- WebSocket APIを使う場合は `$connect`・`$disconnect`・`$default` の3ルートすべてを必ず CDK で登録する
+- SFn の最終ステップ (Notify) が送受信するメッセージ型・フィールド名はフロントエンドと事前に定義し、コード生成時に一致させる
+- `boto3.client("s3")` は明示的に `region_name` と `config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"})` を設定する（特に署名付きURL生成時）
+- React Three Fiber では `useGLTF` フックを含む `@react-three/drei` コンポーネントは `<Suspense>` の内側に配置する必要がある
+- CDK でパイプラインのLambdaに渡す環境変数（APIのIDなど）は、依存スタックのエクスポート値を `extra_env` で明示的に渡し、実装コードではすべて環境変数から読み取る
