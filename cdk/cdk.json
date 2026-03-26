@@ -2,8 +2,8 @@
   "app": "python app.py",
   "context": {
     "environment": "dev",
-    "useMockAI": true,
-    "enableFargate": false,
+    "useMockAI": false,
+    "enableFargate": true,
     "bedrockRegion": "ap-northeast-1"
   },
   "watch": {
