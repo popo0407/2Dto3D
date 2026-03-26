@@ -35,6 +35,7 @@ class PipelineStack(Stack):
         artifacts_bucket: s3.Bucket,
         previews_bucket: s3.Bucket,
         websocket_api: apigwv2.WebSocketApi,
+        enable_fargate: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -130,64 +131,130 @@ class PipelineStack(Stack):
             memory_mb=256,
         )
 
-        # ---------- ECS Fargate (CadQuery Runner) ----------
-        vpc = ec2.Vpc(
-            self,
-            "PipelineVpc",
-            vpc_name=f"{project_name}-{env_name}-pipeline-vpc",
-            max_azs=2,
-            nat_gateways=0 if env_name == "dev" else 1,
-            subnet_configuration=[
-                ec2.SubnetConfiguration(
-                    name="Public",
-                    subnet_type=ec2.SubnetType.PUBLIC,
-                    cidr_mask=24,
+        # ---------- Step 3: CadQuery Runner ----------
+        # enable_fargate=True (prod): ECS Fargate で実際の CadQuery を実行する
+        # enable_fargate=False (dev): Docker ビルド不要のモック Lambda でプレースホルダーを生成する
+        if enable_fargate:
+            vpc = ec2.Vpc(
+                self,
+                "PipelineVpc",
+                vpc_name=f"{project_name}-{env_name}-pipeline-vpc",
+                max_azs=2,
+                nat_gateways=1,
+                subnet_configuration=[
+                    ec2.SubnetConfiguration(
+                        name="Public",
+                        subnet_type=ec2.SubnetType.PUBLIC,
+                        cidr_mask=24,
+                    ),
+                ],
+            )
+
+            cluster = ecs.Cluster(
+                self,
+                "FargateCluster",
+                cluster_name=f"{project_name}-{env_name}-cluster",
+                vpc=vpc,
+            )
+
+            task_definition = ecs.FargateTaskDefinition(
+                self,
+                "CadQueryTaskDef",
+                family=f"{project_name}-{env_name}-cadquery-runner",
+                cpu=2048,
+                memory_limit_mib=4096,
+            )
+
+            uploads_bucket.grant_read(task_definition.task_role)
+            artifacts_bucket.grant_read_write(task_definition.task_role)
+            previews_bucket.grant_read_write(task_definition.task_role)
+            nodes_table.grant_read_write_data(task_definition.task_role)
+            sessions_table.grant_read_write_data(task_definition.task_role)
+
+            log_group = logs.LogGroup(
+                self,
+                "CadQueryLogs",
+                log_group_name=f"/ecs/{project_name}-{env_name}-cadquery-runner",
+                removal_policy=RemovalPolicy.DESTROY,
+                retention=logs.RetentionDays.TWO_WEEKS,
+            )
+
+            container = task_definition.add_container(
+                "CadQueryContainer",
+                container_name="cadquery-runner",
+                image=ecs.ContainerImage.from_asset("../backend/functions/cadquery_runner"),
+                logging=ecs.LogDrivers.aws_logs(
+                    stream_prefix="cadquery", log_group=log_group
                 ),
-            ],
-        )
+                environment={
+                    **common_env,
+                    "WEBSOCKET_API_ID": websocket_api.api_id,
+                },
+            )
 
-        cluster = ecs.Cluster(
+            cadquery_step = tasks.EcsRunTask(
+                self,
+                "CadQueryStep",
+                integration_pattern=sfn.IntegrationPattern.RUN_JOB,
+                cluster=cluster,
+                task_definition=task_definition,
+                launch_target=tasks.EcsFargateLaunchTarget(
+                    platform_version=ecs.FargatePlatformVersion.LATEST,
+                ),
+                assign_public_ip=True,
+                container_overrides=[
+                    tasks.ContainerOverride(
+                        container_definition=container,
+                        environment=[
+                            tasks.TaskEnvironmentVariable(
+                                name="SESSION_ID",
+                                value=sfn.JsonPath.string_at("$.session_id"),
+                            ),
+                            tasks.TaskEnvironmentVariable(
+                                name="NODE_ID",
+                                value=sfn.JsonPath.string_at("$.node_id"),
+                            ),
+                        ],
+                    )
+                ],
+                result_path="$.cadquery_result",
+            )
+        else:
+            # dev: Docker ビルド不要のモック Lambda
+            mock_cq_fn = pipeline_lambda(
+                "mock_cadquery",
+                timeout_seconds=30,
+                memory_mb=256,
+            )
+            cadquery_step = tasks.LambdaInvoke(
+                self,
+                "CadQueryStep",
+                lambda_function=mock_cq_fn,
+                payload_response_only=True,
+                result_path="$",
+            )
+
+        # ---------- Pipeline error notifier ----------
+        # 任意のステップで例外が発生した場合にセッションを FAILED に更新し
+        # WebSocket 経由でフロントエンドに PROCESSING_FAILED を通知する
+        error_fn = pipeline_lambda(
+            "pipeline_error_handler",
+            timeout_seconds=30,
+            memory_mb=256,
+        )
+        error_step = tasks.LambdaInvoke(
             self,
-            "FargateCluster",
-            cluster_name=f"{project_name}-{env_name}-cluster",
-            vpc=vpc,
+            "PipelineErrorStep",
+            lambda_function=error_fn,
+            payload_response_only=True,
+            result_path="$",
         )
-
-        task_definition = ecs.FargateTaskDefinition(
+        fail_state = sfn.Fail(
             self,
-            "CadQueryTaskDef",
-            family=f"{project_name}-{env_name}-cadquery-runner",
-            cpu=2048,
-            memory_limit_mib=4096,
+            "PipelineFailed",
+            cause="Pipeline processing error — see PipelineErrorStep logs",
         )
-
-        # Grant S3 access to Fargate task
-        uploads_bucket.grant_read(task_definition.task_role)
-        artifacts_bucket.grant_read_write(task_definition.task_role)
-        previews_bucket.grant_read_write(task_definition.task_role)
-        nodes_table.grant_read_write_data(task_definition.task_role)
-        sessions_table.grant_read_write_data(task_definition.task_role)
-
-        log_group = logs.LogGroup(
-            self,
-            "CadQueryLogs",
-            log_group_name=f"/ecs/{project_name}-{env_name}-cadquery-runner",
-            removal_policy=RemovalPolicy.DESTROY,
-            retention=logs.RetentionDays.TWO_WEEKS,
-        )
-
-        container = task_definition.add_container(
-            "CadQueryContainer",
-            container_name="cadquery-runner",
-            image=ecs.ContainerImage.from_asset("../backend/functions/cadquery_runner"),
-            logging=ecs.LogDrivers.aws_logs(
-                stream_prefix="cadquery", log_group=log_group
-            ),
-            environment={
-                **common_env,
-                "WEBSOCKET_API_ID": websocket_api.api_id,
-            },
-        )
+        error_step.next(fail_state)
 
         # ---------- Step Functions ----------
         # payload_response_only=True: Lambda の戻り値のみ取得（StatusCode等のラッパーを除去）
@@ -206,34 +273,6 @@ class PipelineStack(Stack):
             lambda_function=ai_analyze_fn,
             payload_response_only=True,
             result_path="$",
-        )
-
-        cadquery_step = tasks.EcsRunTask(
-            self,
-            "CadQueryStep",
-            integration_pattern=sfn.IntegrationPattern.RUN_JOB,
-            cluster=cluster,
-            task_definition=task_definition,
-            launch_target=tasks.EcsFargateLaunchTarget(
-                platform_version=ecs.FargatePlatformVersion.LATEST,
-            ),
-            assign_public_ip=True,
-            container_overrides=[
-                tasks.ContainerOverride(
-                    container_definition=container,
-                    environment=[
-                        tasks.TaskEnvironmentVariable(
-                            name="SESSION_ID",
-                            value=sfn.JsonPath.string_at("$.session_id"),
-                        ),
-                        tasks.TaskEnvironmentVariable(
-                            name="NODE_ID",
-                            value=sfn.JsonPath.string_at("$.node_id"),
-                        ),
-                    ],
-                )
-            ],
-            result_path="$.cadquery_result",
         )
 
         optimize_step = tasks.LambdaInvoke(
@@ -259,6 +298,20 @@ class PipelineStack(Stack):
             payload_response_only=True,
             result_path="$",
         )
+
+        # 全ステップでエラーをキャッチして WebSocket 経由でフロントエンドに通知
+        for step_to_catch in [
+            parse_step,
+            ai_analyze_step,
+            cadquery_step,
+            optimize_step,
+            validate_step,
+        ]:
+            step_to_catch.add_catch(
+                error_step,
+                errors=["States.ALL"],
+                result_path="$.error",
+            )
 
         definition = (
             parse_step.next(ai_analyze_step)

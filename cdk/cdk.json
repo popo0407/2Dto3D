@@ -3,6 +3,7 @@
   "context": {
     "environment": "dev",
     "useMockAI": true,
+    "enableFargate": false,
     "bedrockRegion": "ap-northeast-1"
   },
   "watch": {
