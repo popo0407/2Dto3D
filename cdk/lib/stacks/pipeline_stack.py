@@ -1,3 +1,5 @@
+import os
+
 from aws_cdk import (
     Stack,
     Duration,
@@ -17,6 +19,12 @@ from aws_cdk import (
     CfnOutput,
 )
 from constructs import Construct
+
+from ..constructs.python_layer import prepare_common_layer_dir
+
+_BACKEND_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "../../../backend")
+)
 
 
 class PipelineStack(Stack):
@@ -55,14 +63,15 @@ class PipelineStack(Stack):
         }
 
         # ---------- Common Layer ----------
+        # Lambda Layers require Python modules under python/ in the zip so
+        # the runtime can find them at /opt/python/.  We pre-build the
+        # python/common/ structure and use that directory as the CDK asset.
+        _layer_dir = prepare_common_layer_dir(_BACKEND_DIR)
         common_layer = lambda_.LayerVersion(
             self,
             "PipelineCommonLayer",
             layer_version_name=f"{project_name}-{env_name}-pipeline-common",
-            code=lambda_.Code.from_asset(
-                "../backend",
-                exclude=["tests/*", "functions/*", "*.pyc", "__pycache__"],
-            ),
+            code=lambda_.Code.from_asset(_layer_dir),
             compatible_runtimes=[lambda_.Runtime.PYTHON_3_12],
         )
 
