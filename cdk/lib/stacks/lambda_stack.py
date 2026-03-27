@@ -129,7 +129,11 @@ class LambdaStack(Stack):
         if not use_mock_ai:
             chat_fn.add_to_role_policy(
                 iam.PolicyStatement(
-                    actions=["bedrock:InvokeModel"],
+                    actions=[
+                        "bedrock:InvokeModel",
+                        "aws-marketplace:ViewSubscriptions",
+                        "aws-marketplace:Subscribe",
+                    ],
                     resources=["*"],
                 )
             )
