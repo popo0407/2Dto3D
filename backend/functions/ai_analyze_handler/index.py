@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import time
+from decimal import Decimal
 
 import boto3
 from common.ws_notify import send_progress
@@ -23,6 +24,17 @@ BEDROCK_REGION = os.environ.get("BEDROCK_REGION", "ap-northeast-1")
 
 dynamodb = boto3.resource("dynamodb")
 s3_client = boto3.client("s3")
+
+
+def _to_decimal(obj):
+    """DynamoDB は float 非対応のため再帰的に Decimal へ変換する。"""
+    if isinstance(obj, float):
+        return Decimal(str(obj))
+    if isinstance(obj, dict):
+        return {k: _to_decimal(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_to_decimal(v) for v in obj]
+    return obj
 
 
 def lambda_handler(event: dict, context) -> dict:
@@ -110,8 +122,8 @@ def lambda_handler(event: dict, context) -> dict:
         UpdateExpression="SET cadquery_script = :script, confidence_map = :conf, ai_questions = :q",
         ExpressionAttributeValues={
             ":script": cadquery_script,
-            ":conf": confidence_map,
-            ":q": questions,
+            ":conf": _to_decimal(confidence_map),
+            ":q": _to_decimal(questions),
         },
     )
 
