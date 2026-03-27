@@ -99,6 +99,51 @@
 
 ---
 
+## 2026-03 DynamoDB float 型エラー修正
+
+### 実施内容
+- Step2 (ai_analyze_handler) が正常にBedrockを呼び出してCadQueryスクリプト生成に成功した後、DynamoDBへの書き込みで TypeError に遭遇
+- 原因調査・修正・Lambda関数更新
+
+### 発生した問題と対処
+
+| 問題 | 原因 | 対処 |
+|------|------|------|
+| `TypeError: Float types are not supported. Use Decimal types instead.` | `ai_analyze_handler` が `confidence_map` (例: `0.95`、`0.80`) と `questions` 内の `confidence` フィールド (例: `0.45`) を `float` のまま DynamoDB に `put_item`/`update_item` していた。DynamoDB は float 非対応で、Decimal型への変換が必須 | `_to_decimal()` ヘルパー関数を追加し、DynamoDB書き込み前にすべてのfloat値を `Decimal(str(value))` に変換。`confidence_map` と `questions` に対して関数を適用 |
+
+### 修正の詳細
+```python
+from decimal import Decimal
+
+def _to_decimal(obj):
+    """再帰的に float → Decimal に変換（DynamoDB非対応のため）"""
+    if isinstance(obj, float):
+        return Decimal(str(obj))  # float str化後 Decimal化（精度損失防止）
+    if isinstance(obj, dict):
+        return {k: _to_decimal(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_to_decimal(v) for v in obj]
+    return obj
+
+# DynamoDB update_item 呼び出し時に使用
+nodes_table.update_item(
+    Key={"node_id": node_id},
+    UpdateExpression="SET cadquery_script = :script, confidence_map = :conf, ai_questions = :q",
+    ExpressionAttributeValues={
+        ":script": cadquery_script,
+        ":conf": _to_decimal(confidence_map),     # float → Decimal変換
+        ":q": _to_decimal(questions),              # float → Decimal変換
+    },
+)
+```
+
+### 改善策・再発防止
+- **DynamoDB はnative型として float をサポートしない**ため、Python boto3 で数値を格納する際は常に `Decimal` 型を使用する
+- AI/機械学習処理で確度スコア (0.0～1.0) を扱う場合は、**JSON解析直後に再帰的にDecimal変換する** ジェネリック処理を用意しておく
+- DynamoDB アイテム更新時は ExpressionAttributeValues の値についても型チェックを習慣付ける
+
+---
+
 ## 2026-03 進捗0%スタック バグ修正（第2弾）
 
 ### 実施内容
