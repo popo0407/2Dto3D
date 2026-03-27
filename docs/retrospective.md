@@ -138,3 +138,23 @@
 - Python Lambda Layer の zip 構造は **`python/<module_name>/`** でなければならない。`Code.from_asset` でソースディレクトリを直接指定すると `python/` プレフィックスが付かないため、必ず中間ディレクトリを用意するか bundling を使うこと
 - CDK の `BundlingOptions.local` に渡すクラスは `@jsii.implements(ILocalBundling)` JSII デコレータが必要。JSII 非対応クラスを渡すと `AttributeError: __jsii_type__` で失敗する。Dockerなしの代替手段として CDK synth 前に Python で中間ディレクトリを生成するシンプルな関数を使う方が安全
 - Lambda Layer 開発時は `cdk synth` 後に `cdk.out/` の asset zip を展開してディレクトリ構造を確認する習慣をつける
+---
+
+## 2026-03 Bedrock ValidationException（推論プロファイルID）修正
+
+### 実施内容
+- `ai_analyze_handler`（Step2）で ValidationException が連続発生
+- Bedrock モデルID の誤りを2段階で修正
+
+### 発生した問題と対処
+
+| 問題 | 原因 | 対処 |
+|------|------|------|
+| `ValidationException: The provided model identifier is invalid` | モデルIDが `anthropic.claude-sonnet-4-6-20250514`（ap-northeast-1に存在しないID）だった | `anthropic.claude-sonnet-4-6` に変更 |
+| `ValidationException: Invocation of model ID anthropic.claude-sonnet-4-6 with on-demand throughput isn't supported. Retry your request with the ID or ARN of an inference profile` | Claude Sonnet 4.6はオンデマンドスループットに非対応。クロスリージョン推論プロファイル経由でのみ呼び出し可能 | `jp.anthropic.claude-sonnet-4-6`（ap-northeast-1向けJPプロファイルID）に変更 |
+
+### 改善策・再発防止
+- Amazon Bedrock の新しい（Claude 4系以降）モデルは`on-demand`スループットに非対応のものが多く、**推論プロファイルID**（`jp.`, `us.`, `global.` プレフィックス）を使う必要がある
+- モデルIDは `aws bedrock list-foundation-models` ではなく **`aws bedrock list-inference-profiles`** で確認する（リージョン別プロファイルと基盤モデルIDは別物）
+- ap-northeast-1 の場合: `jp.anthropic.claude-sonnet-4-6`（JP profile）または `global.anthropic.claude-sonnet-4-6`
+- `list-foundation-models` に表示される `anthropic.claude-sonnet-4-6` は基盤モデルIDで、直接 `InvokeModel` には使えない
