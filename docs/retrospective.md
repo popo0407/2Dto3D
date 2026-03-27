@@ -203,3 +203,27 @@ nodes_table.update_item(
 - モデルIDは `aws bedrock list-foundation-models` ではなく **`aws bedrock list-inference-profiles`** で確認する（リージョン別プロファイルと基盤モデルIDは別物）
 - ap-northeast-1 の場合: `jp.anthropic.claude-sonnet-4-6`（JP profile）または `global.anthropic.claude-sonnet-4-6`
 - `list-foundation-models` に表示される `anthropic.claude-sonnet-4-6` は基盤モデルIDで、直接 `InvokeModel` には使えない
+
+---
+
+## 2026-03 Bedrock IAM権限不足エラー修正
+
+### 実施内容
+- Step2 (ai_analyze_handler) で Bedrock モデル呼び出しが AccessDeniedException で失敗
+- Lambda 実行ロールに AWS Marketplace 権限が不足していたことが原因
+
+### 発生した問題と対処
+
+| 問題 | 原因 | 対処 |
+|------|------|------|
+| `AccessDeniedException: Model access is denied due to IAM user or service role is not authorized to perform the required AWS Marketplace actions (aws-marketplace:ViewSubscriptions, aws-marketplace:Subscribe)` | CDK の bedrock IAM ポリシーが `bedrock:InvokeModel` のみを含んでおり、AWS Marketplace サブスクリプション関連権限が不足していた | `pipeline_stack.py` と `lambda_stack.py` の bedrock_policy に `aws-marketplace:ViewSubscriptions` と `aws-marketplace:Subscribe` を追加。両方のスタックを再デプロイ |
+
+### 改善策・再発防止
+- **Bedrock モデル（特に外部提供モデル）の呼び出しには、単なる `bedrock:InvokeModel` 権限では足りない**。以下の3つのアクションをセットで付与する必要がある：
+  ```
+  bedrock:InvokeModel
+  aws-marketplace:ViewSubscriptions
+  aws-marketplace:Subscribe
+  ```
+- Bedrock IAM ポリシードキュメント作成時は公式 AWS ドキュメント（Bedrock IAM permissions guide）を参照し、常に3つのアクションをセットで含める
+- Lambda エラーログが `aws-marketplace:` を含む場合は、CDK で定義した IAM ポリシーの action リストを確認し、AWS Marketplace 権限が含まれているか確認する、直接 `InvokeModel` には使えない
