@@ -119,3 +119,22 @@
 - `boto3.client("s3")` は明示的に `region_name` と `config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"})` を設定する（特に署名付きURL生成時）
 - React Three Fiber では `useGLTF` フックを含む `@react-three/drei` コンポーネントは `<Suspense>` の内側に配置する必要がある
 - CDK でパイプラインのLambdaに渡す環境変数（APIのIDなど）は、依存スタックのエクスポート値を `extra_env` で明示的に渡し、実装コードではすべて環境変数から読み取る
+
+---
+
+## 2026-03 Runtime.ImportModuleError 修正
+
+### 実施内容
+- パイプライン処理の全Lambda関数で `Runtime.ImportModuleError: No module named 'common'` が発生
+- Lambda Layer の構造が誤っており修正した
+
+### 発生した問題と対処
+
+| 問題 | 原因 | 対処 |
+|------|------|------|
+| 全Lambda関数で `No module named 'common'` | `lambda_stack.py`・`pipeline_stack.py` の CommonLayer が `Code.from_asset("../backend", exclude=[...])` でパッケージされており、zip内のモジュールが `common/` のルート直下に配置されていた。PythonのLambda Layerは `/opt/python/` 以下にモジュールを配置する必要があるため、`python/` サブディレクトリがなければランタイムが見つけられない | `cdk/lib/constructs/python_layer.py` に `prepare_common_layer_dir()` を作成。CDK synthesisの前に `backend/.layer_build/python/common/` を動的生成し、そのディレクトリを `Code.from_asset` のソースとして使用 |
+
+### 改善策・再発防止
+- Python Lambda Layer の zip 構造は **`python/<module_name>/`** でなければならない。`Code.from_asset` でソースディレクトリを直接指定すると `python/` プレフィックスが付かないため、必ず中間ディレクトリを用意するか bundling を使うこと
+- CDK の `BundlingOptions.local` に渡すクラスは `@jsii.implements(ILocalBundling)` JSII デコレータが必要。JSII 非対応クラスを渡すと `AttributeError: __jsii_type__` で失敗する。Dockerなしの代替手段として CDK synth 前に Python で中間ディレクトリを生成するシンプルな関数を使う方が安全
+- Lambda Layer 開発時は `cdk synth` 後に `cdk.out/` の asset zip を展開してディレクトリ構造を確認する習慣をつける
