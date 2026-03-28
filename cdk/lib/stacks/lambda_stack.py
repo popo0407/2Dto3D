@@ -29,7 +29,6 @@ class LambdaStack(Stack):
         construct_id: str,
         env_name: str,
         project_name: str,
-        use_mock_ai: bool,
         bedrock_region: str,
         sessions_table: dynamodb.Table,
         nodes_table: dynamodb.Table,
@@ -45,7 +44,6 @@ class LambdaStack(Stack):
         common_env = {
             "ENV_NAME": env_name,
             "PROJECT_NAME": project_name,
-            "USE_MOCK_AI": "true" if use_mock_ai else "false",
             "BEDROCK_REGION": bedrock_region,
             "SESSIONS_TABLE": sessions_table.table_name,
             "NODES_TABLE": nodes_table.table_name,
@@ -126,17 +124,16 @@ class LambdaStack(Stack):
                 resources=[_queue_arn],
             )
         )
-        if not use_mock_ai:
-            chat_fn.add_to_role_policy(
-                iam.PolicyStatement(
-                    actions=[
-                        "bedrock:InvokeModel",
-                        "aws-marketplace:ViewSubscriptions",
-                        "aws-marketplace:Subscribe",
-                    ],
-                    resources=["*"],
-                )
+        chat_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "bedrock:InvokeModel",
+                    "aws-marketplace:ViewSubscriptions",
+                    "aws-marketplace:Subscribe",
+                ],
+                resources=["*"],
             )
+        )
         nodes_table.grant_read_write_data(chat_fn)
         artifacts_bucket.grant_read(chat_fn)
 

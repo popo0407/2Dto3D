@@ -14,10 +14,6 @@ env_name: str = app.node.try_get_context("environment") or "dev"
 project_name = "2dto3d"
 stack_prefix = f"Cad2d3d-{env_name}"
 
-use_mock_ai = app.node.try_get_context("useMockAI")
-if use_mock_ai is None:
-    use_mock_ai = env_name == "dev"
-
 enable_fargate_ctx = app.node.try_get_context("enableFargate")
 if enable_fargate_ctx is None:
     enable_fargate = env_name != "dev"
@@ -63,7 +59,6 @@ lambda_stack = LambdaStack(
     f"{stack_prefix}-lambda",
     env_name=env_name,
     project_name=project_name,
-    use_mock_ai=use_mock_ai,
     bedrock_region=bedrock_region,
     sessions_table=database_stack.sessions_table,
     nodes_table=database_stack.nodes_table,
@@ -83,7 +78,6 @@ pipeline_stack = PipelineStack(
     f"{stack_prefix}-pipeline",
     env_name=env_name,
     project_name=project_name,
-    use_mock_ai=use_mock_ai,
     bedrock_region=bedrock_region,
     sessions_table=database_stack.sessions_table,
     nodes_table=database_stack.nodes_table,

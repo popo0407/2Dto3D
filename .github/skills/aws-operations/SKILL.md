@@ -43,10 +43,10 @@ description: AWS環境の運用・コスト最適化・セキュリティ規約
 
 ### 3.1 環境定義
 
-| 環境 | 用途 | AI モード | Fargate | コスト |
-|------|------|----------|---------|--------|
-| **dev** | 開発・検証 | モック（デフォルト） | 無効 | 最小 |
-| **prod** | 本番運用 | 本番 AI（有料） | 有効 | 最大 |
+| 環境 | 用途 | Fargate | コスト |
+|------|------|---------|--------|
+| **dev** | 開発・検証 | 無効 | 最小 |
+| **prod** | 本番運用 | 有効 | 最大 |
 
 ### 3.2 命名規則（強制）
 
@@ -78,19 +78,14 @@ resource_id = f"{project_name}-{env_name}-{resource_type}"
 ### 4.1 Bedrock Knowledge Base・API 呼び出し
 
 **原則**:
-- dev 環境では原則 **モック AI** を使用
-- 本番 AI テスト時のみ本番 API を呼び出す
+- 全環境（dev / prod）で本番 AI（Bedrock API）を使用
+- モック AI は使用しない
 
-**Lambda 環境変数による制御**:
+**Lambda 環境変数**:
 
 ```python
-# dev環境
-USE_MOCK_AI=true   # モック応答使用（無料）
-USE_MOCK_RAG=true  # モック RAG 使用（無料）
-
-# prod環境
-USE_MOCK_AI=false  # 本番 AI API 呼び出し（有料）
-USE_MOCK_RAG=false # 本番 Knowledge Base 連携（有料）
+# 全環境共通
+USE_BEDROCK=true  # 本番 AI API 呼び出し
 ```
 
 ### 4.2 ECS Fargate コスト削減

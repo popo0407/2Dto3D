@@ -34,7 +34,6 @@ class PipelineStack(Stack):
         construct_id: str,
         env_name: str,
         project_name: str,
-        use_mock_ai: bool,
         bedrock_region: str,
         sessions_table: dynamodb.Table,
         nodes_table: dynamodb.Table,
@@ -51,7 +50,6 @@ class PipelineStack(Stack):
         common_env = {
             "ENV_NAME": env_name,
             "PROJECT_NAME": project_name,
-            "USE_MOCK_AI": "true" if use_mock_ai else "false",
             "BEDROCK_REGION": bedrock_region,
             "SESSIONS_TABLE": sessions_table.table_name,
             "NODES_TABLE": nodes_table.table_name,
@@ -126,8 +124,7 @@ class PipelineStack(Stack):
         ai_analyze_fn = pipeline_lambda(
             "ai_analyze_handler", timeout_seconds=300, memory_mb=1024
         )
-        if not use_mock_ai:
-            ai_analyze_fn.add_to_role_policy(bedrock_policy)
+        ai_analyze_fn.add_to_role_policy(bedrock_policy)
 
         # Step 4: Optimize handler
         optimize_fn = pipeline_lambda(

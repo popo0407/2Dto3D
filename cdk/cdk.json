@@ -2,7 +2,6 @@
   "app": "python app.py",
   "context": {
     "environment": "dev",
-    "useMockAI": false,
     "enableFargate": true,
     "bedrockRegion": "ap-northeast-1"
   },
