@@ -4,6 +4,7 @@ import { API_BASE } from "../config";
 interface HistoryPanelProps {
   sessionId: string;
   onNodeSelect: (nodeId: string) => void;
+  idToken: string;
 }
 
 interface NodeSummary {
@@ -13,7 +14,7 @@ interface NodeSummary {
   created_at: number;
 }
 
-export function HistoryPanel({ sessionId, onNodeSelect }: HistoryPanelProps) {
+export function HistoryPanel({ sessionId, onNodeSelect, idToken }: HistoryPanelProps) {
   const [nodes, setNodes] = useState<NodeSummary[]>([]);
 
   useEffect(() => {
@@ -21,7 +22,9 @@ export function HistoryPanel({ sessionId, onNodeSelect }: HistoryPanelProps) {
 
     const fetchNodes = async () => {
       try {
-        const res = await fetch(`${API_BASE}/sessions/${sessionId}/nodes`);
+        const res = await fetch(`${API_BASE}/sessions/${sessionId}/nodes`, {
+          headers: { Authorization: `Bearer ${idToken}` },
+        });
         if (!res.ok) return;
         const data = (await res.json()) as { nodes: NodeSummary[] };
         setNodes(data.nodes);

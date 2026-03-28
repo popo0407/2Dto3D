@@ -15,11 +15,13 @@ logger.setLevel(logging.INFO)
 SESSIONS_TABLE = os.environ.get("SESSIONS_TABLE", "")
 NODES_TABLE = os.environ.get("NODES_TABLE", "")
 ARTIFACTS_BUCKET = os.environ.get("ARTIFACTS_BUCKET", "")
+PROCESSING_QUEUE_URL = os.environ.get("PROCESSING_QUEUE_URL", "")
 USE_MOCK_AI = os.environ.get("USE_MOCK_AI", "true").lower() == "true"
 BEDROCK_REGION = os.environ.get("BEDROCK_REGION", "ap-northeast-1")
 
 dynamodb = boto3.resource("dynamodb")
 s3_client = boto3.client("s3")
+sqs_client = boto3.client("sqs")
 
 
 def lambda_handler(event: dict, context) -> dict:
@@ -120,6 +122,19 @@ def lambda_handler(event: dict, context) -> dict:
     )
 
     # TODO: Optionally trigger CadQuery re-execution via SQS
+    # 修正スクリプトで CadQuery パイプラインを再実行する
+    if PROCESSING_QUEUE_URL:
+        sqs_client.send_message(
+            QueueUrl=PROCESSING_QUEUE_URL,
+            MessageBody=json.dumps({
+                "session_id": session_id,
+                "node_id": new_node_id,
+                "restart_from_cadquery": True,
+            }),
+        )
+        logger.info("Triggered pipeline re-execution for node %s", new_node_id)
+    else:
+        logger.warning("PROCESSING_QUEUE_URL not set — pipeline re-execution skipped")
 
     logger.info("Chat created new node %s from parent %s", new_node_id, node_id)
     return _response(201, new_node)

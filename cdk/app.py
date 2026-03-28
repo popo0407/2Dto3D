@@ -18,6 +18,13 @@ use_mock_ai = app.node.try_get_context("useMockAI")
 if use_mock_ai is None:
     use_mock_ai = env_name == "dev"
 
+enable_fargate_ctx = app.node.try_get_context("enableFargate")
+if enable_fargate_ctx is None:
+    enable_fargate = env_name != "dev"
+else:
+    # cdk.json / --context の値は文字列またはboolの場合がある
+    enable_fargate = str(enable_fargate_ctx).lower() not in ("false", "0", "no")
+
 bedrock_region: str = app.node.try_get_context("bedrockRegion") or "ap-northeast-1"
 
 aws_env = cdk.Environment(
@@ -85,6 +92,7 @@ pipeline_stack = PipelineStack(
     artifacts_bucket=network_stack.artifacts_bucket,
     previews_bucket=network_stack.previews_bucket,
     websocket_api=lambda_stack.websocket_api,
+    enable_fargate=enable_fargate,
     env=aws_env,
 )
 pipeline_stack.add_dependency(lambda_stack)

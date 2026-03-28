@@ -15,10 +15,12 @@ logger.setLevel(logging.INFO)
 SESSIONS_TABLE = os.environ.get("SESSIONS_TABLE", "")
 NODES_TABLE = os.environ.get("NODES_TABLE", "")
 CONNECTIONS_TABLE = os.environ.get("CONNECTIONS_TABLE", "")
+PREVIEWS_BUCKET = os.environ.get("PREVIEWS_BUCKET", "")
 WEBSOCKET_API_ID = os.environ.get("WEBSOCKET_API_ID", "")
 ENV_NAME = os.environ.get("ENV_NAME", "dev")
 
 dynamodb = boto3.resource("dynamodb")
+s3_client = boto3.client("s3")
 
 
 def lambda_handler(event: dict, context) -> dict:
@@ -47,21 +49,28 @@ def lambda_handler(event: dict, context) -> dict:
         },
     )
 
-    # Get session to find user_id
-    resp = sessions_table.get_item(Key={"session_id": session_id})
-    session = resp.get("Item", {})
-    user_id = session.get("user_id", "")
+    # Get node to find gltf preview URL
+    nodes_table = dynamodb.Table(NODES_TABLE)
+    node_resp = nodes_table.get_item(Key={"node_id": node_id})
+    node = node_resp.get("Item", {})
+    preview_key = node.get("preview_s3_key", "")
+    gltf_url = ""
+    if preview_key and PREVIEWS_BUCKET:
+        try:
+            gltf_url = s3_client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": PREVIEWS_BUCKET, "Key": preview_key},
+                ExpiresIn=3600,
+            )
+        except Exception as e:
+            logger.warning("Failed to generate presigned URL for %s: %s", preview_key, e)
 
-    if not user_id:
-        logger.warning("No user_id for session %s, skipping notification", session_id)
-        return {"session_id": session_id, "node_id": node_id, "notified": False}
-
-    # Find active connections for this user
+    # Find active connections for this session
     conn_table = dynamodb.Table(CONNECTIONS_TABLE)
-    connections = _get_user_connections(conn_table, user_id)
+    connections = _get_session_connections(conn_table, session_id)
 
     if not connections:
-        logger.info("No active connections for user %s", user_id)
+        logger.info("No active connections for session %s", session_id)
         return {"session_id": session_id, "node_id": node_id, "notified": False}
 
     # Send notification via API Gateway Management API
@@ -70,9 +79,10 @@ def lambda_handler(event: dict, context) -> dict:
     apigw_client = boto3.client("apigatewaymanagementapi", endpoint_url=endpoint_url)
 
     message = json.dumps({
-        "type": "pipeline_complete",
+        "type": "PROCESSING_COMPLETE",
         "session_id": session_id,
         "node_id": node_id,
+        "gltf_url": gltf_url,
         "status": final_status,
         "validation": validation,
     })
@@ -99,9 +109,9 @@ def lambda_handler(event: dict, context) -> dict:
     return {"session_id": session_id, "node_id": node_id, "notified": notified_count > 0}
 
 
-def _get_user_connections(table, user_id: str) -> list[dict]:
-    """Scan connections table for user (small table, scan is acceptable)."""
+def _get_session_connections(table, session_id: str) -> list[dict]:
+    """Scan connections table for a session (small table, scan is acceptable)."""
     resp = table.scan(
-        FilterExpression=boto3.dynamodb.conditions.Attr("user_id").eq(user_id),
+        FilterExpression=boto3.dynamodb.conditions.Attr("session_id").eq(session_id),
     )
     return resp.get("Items", [])

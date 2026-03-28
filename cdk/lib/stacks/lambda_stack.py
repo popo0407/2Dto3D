@@ -1,3 +1,5 @@
+import os
+
 from aws_cdk import (
     Stack,
     Duration,
@@ -12,6 +14,12 @@ from aws_cdk import (
     CfnOutput,
 )
 from constructs import Construct
+
+from ..constructs.python_layer import prepare_common_layer_dir
+
+_BACKEND_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "../../../backend")
+)
 
 
 class LambdaStack(Stack):
@@ -48,14 +56,15 @@ class LambdaStack(Stack):
         }
 
         # ---------- Common Layer ----------
+        # Lambda Layers require Python modules under python/ in the zip so
+        # the runtime can find them at /opt/python/.  We pre-build the
+        # python/common/ structure and use that directory as the CDK asset.
+        _layer_dir = prepare_common_layer_dir(_BACKEND_DIR)
         common_layer = lambda_.LayerVersion(
             self,
             "CommonLayer",
             layer_version_name=f"{project_name}-{env_name}-common",
-            code=lambda_.Code.from_asset(
-                "../backend",
-                exclude=["tests/*", "functions/*", "*.pyc", "__pycache__"],
-            ),
+            code=lambda_.Code.from_asset(_layer_dir),
             compatible_runtimes=[lambda_.Runtime.PYTHON_3_12],
         )
 
@@ -84,17 +93,47 @@ class LambdaStack(Stack):
             nodes_table.grant_read_write_data(fn)
             return fn
 
-        upload_fn = create_function("upload_handler")
+        # Queue name is deterministic — avoids circular cross-stack reference
+        # (pipeline_stack already depends on lambda_stack for websocket_api)
+        _queue_name = f"{project_name}-{env_name}-processing-queue"
+        _queue_url = f"https://sqs.{self.region}.amazonaws.com/{self.account}/{_queue_name}"
+        _queue_arn = f"arn:aws:sqs:{self.region}:{self.account}:{_queue_name}"
+
+        upload_fn = create_function(
+            "upload_handler",
+            extra_env={"PROCESSING_QUEUE_URL": _queue_url},
+        )
+        upload_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["sqs:SendMessage"],
+                resources=[_queue_arn],
+            )
+        )
         uploads_bucket.grant_put(upload_fn)
         uploads_bucket.grant_read(upload_fn)
 
         history_fn = create_function("history_handler")
 
-        chat_fn = create_function("chat_handler", timeout_seconds=60, memory_mb=512)
+        chat_fn = create_function(
+            "chat_handler",
+            timeout_seconds=60,
+            memory_mb=512,
+            extra_env={"PROCESSING_QUEUE_URL": _queue_url},
+        )
+        chat_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["sqs:SendMessage"],
+                resources=[_queue_arn],
+            )
+        )
         if not use_mock_ai:
             chat_fn.add_to_role_policy(
                 iam.PolicyStatement(
-                    actions=["bedrock:InvokeModel"],
+                    actions=[
+                        "bedrock:InvokeModel",
+                        "aws-marketplace:ViewSubscriptions",
+                        "aws-marketplace:Subscribe",
+                    ],
                     resources=["*"],
                 )
             )
@@ -130,6 +169,20 @@ class LambdaStack(Stack):
         )
         connections_table.grant_read_write_data(ws_disconnect_fn)
 
+        ws_default_fn = lambda_.Function(
+            self,
+            "WsDefaultFunction",
+            function_name=f"{project_name}-{env_name}-ws-default",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="index.default_handler",
+            code=lambda_.Code.from_asset("../backend/functions/ws_handler"),
+            layers=[common_layer],
+            timeout=Duration.seconds(10),
+            memory_size=128,
+            environment=common_env,
+        )
+        connections_table.grant_read_write_data(ws_default_fn)
+
         self.websocket_api = apigwv2.WebSocketApi(
             self,
             "WebSocketApi",
@@ -142,6 +195,11 @@ class LambdaStack(Stack):
             disconnect_route_options=apigwv2.WebSocketRouteOptions(
                 integration=integrations_v2.WebSocketLambdaIntegration(
                     "DisconnectIntegration", ws_disconnect_fn
+                ),
+            ),
+            default_route_options=apigwv2.WebSocketRouteOptions(
+                integration=integrations_v2.WebSocketLambdaIntegration(
+                    "DefaultIntegration", ws_default_fn
                 ),
             ),
         )
@@ -172,61 +230,62 @@ class LambdaStack(Stack):
             "CognitoAuthorizer",
             cognito_user_pools=[user_pool],
         )
+        auth_kwargs: dict = {"authorizer": authorizer}
 
         sessions_resource = rest_api.root.add_resource("sessions")
         sessions_resource.add_method(
-            "POST", apigw.LambdaIntegration(upload_fn), authorizer=authorizer
+            "POST", apigw.LambdaIntegration(upload_fn), **auth_kwargs
         )
         sessions_resource.add_method(
-            "GET", apigw.LambdaIntegration(history_fn), authorizer=authorizer
+            "GET", apigw.LambdaIntegration(history_fn), **auth_kwargs
         )
 
         session_resource = sessions_resource.add_resource("{session_id}")
         session_resource.add_method(
-            "GET", apigw.LambdaIntegration(history_fn), authorizer=authorizer
+            "GET", apigw.LambdaIntegration(history_fn), **auth_kwargs
         )
         session_resource.add_method(
-            "DELETE", apigw.LambdaIntegration(history_fn), authorizer=authorizer
+            "DELETE", apigw.LambdaIntegration(history_fn), **auth_kwargs
         )
 
         upload_resource = session_resource.add_resource("upload")
         upload_resource.add_method(
-            "POST", apigw.LambdaIntegration(upload_fn), authorizer=authorizer
+            "POST", apigw.LambdaIntegration(upload_fn), **auth_kwargs
         )
 
         process_resource = session_resource.add_resource("process")
         process_resource.add_method(
-            "POST", apigw.LambdaIntegration(upload_fn), authorizer=authorizer
+            "POST", apigw.LambdaIntegration(upload_fn), **auth_kwargs
         )
 
         nodes_resource = session_resource.add_resource("nodes")
         nodes_resource.add_method(
-            "GET", apigw.LambdaIntegration(history_fn), authorizer=authorizer
+            "GET", apigw.LambdaIntegration(history_fn), **auth_kwargs
         )
 
         node_resource = nodes_resource.add_resource("{node_id}")
         node_resource.add_method(
-            "GET", apigw.LambdaIntegration(history_fn), authorizer=authorizer
+            "GET", apigw.LambdaIntegration(history_fn), **auth_kwargs
         )
 
         chat_resource = node_resource.add_resource("chat")
         chat_resource.add_method(
-            "POST", apigw.LambdaIntegration(chat_fn), authorizer=authorizer
+            "POST", apigw.LambdaIntegration(chat_fn), **auth_kwargs
         )
 
         revert_resource = node_resource.add_resource("revert")
         revert_resource.add_method(
-            "POST", apigw.LambdaIntegration(history_fn), authorizer=authorizer
+            "POST", apigw.LambdaIntegration(history_fn), **auth_kwargs
         )
 
         download_resource = node_resource.add_resource("download")
         download_resource.add_method(
-            "GET", apigw.LambdaIntegration(history_fn), authorizer=authorizer
+            "GET", apigw.LambdaIntegration(history_fn), **auth_kwargs
         )
 
         validate_resource = node_resource.add_resource("validate")
         validate_resource.add_method(
-            "GET", apigw.LambdaIntegration(history_fn), authorizer=authorizer
+            "GET", apigw.LambdaIntegration(history_fn), **auth_kwargs
         )
 
         CfnOutput(self, "RestApiUrl", value=rest_api.url)

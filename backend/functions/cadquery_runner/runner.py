@@ -32,6 +32,42 @@ ARTIFACTS_BUCKET = os.environ.get("ARTIFACTS_BUCKET", "")
 dynamodb = boto3.resource("dynamodb")
 s3_client = boto3.client("s3")
 
+
+def _send_progress(session_id: str, step: str, progress: int, message: str) -> None:
+    """Send a PROGRESS WebSocket message to all active connections for a session."""
+    import json
+    from boto3.dynamodb.conditions import Attr
+
+    api_id = os.environ.get("WEBSOCKET_API_ID", "")
+    connections_table_name = os.environ.get("CONNECTIONS_TABLE", "")
+    region = os.environ.get("AWS_REGION", "ap-northeast-1")
+    stage = os.environ.get("ENV_NAME", "dev")
+
+    if not api_id or not connections_table_name:
+        logger.debug("WEBSOCKET_API_ID not set — skipping progress notification")
+        return
+
+    try:
+        table = dynamodb.Table(connections_table_name)
+        resp = table.scan(FilterExpression=Attr("session_id").eq(session_id))
+        connections = resp.get("Items", [])
+        if not connections:
+            return
+
+        endpoint_url = f"https://{api_id}.execute-api.{region}.amazonaws.com/{stage}"
+        apigw = boto3.client("apigatewaymanagementapi", endpoint_url=endpoint_url)
+        payload = json.dumps(
+            {"type": "PROGRESS", "session_id": session_id, "step": step, "progress": progress, "message": message}
+        ).encode()
+
+        for conn in connections:
+            try:
+                apigw.post_to_connection(ConnectionId=conn["connection_id"], Data=payload)
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.warning("_send_progress failed: %s", exc)
+
 # Dangerous modules/builtins that must not appear in CadQuery scripts
 BLOCKED_IMPORTS = frozenset({"os", "subprocess", "sys", "shutil", "socket", "ctypes"})
 BLOCKED_BUILTINS = frozenset({"eval", "exec", "__import__", "compile", "open"})
@@ -157,6 +193,7 @@ def update_session_status(status: str) -> None:
 
 def main() -> None:
     logger.info("CadQuery Runner started: session=%s, node=%s", SESSION_ID, NODE_ID)
+    _send_progress(SESSION_ID, "BUILDING", 55, "3Dモデル構築中...")
 
     if not all([SESSION_ID, NODE_ID, NODES_TABLE, ARTIFACTS_BUCKET]):
         logger.error("Missing required environment variables")

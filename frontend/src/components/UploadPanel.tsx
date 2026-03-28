@@ -2,15 +2,33 @@ import { useState, useCallback } from "react";
 import { API_BASE } from "../config";
 
 interface UploadPanelProps {
+  idToken: string;
   onSessionCreated: (sessionId: string) => void;
   onProcessingComplete: (nodeId: string, gltfUrl: string) => void;
+  onProcessingStart: (
+    sessionId: string,
+    onComplete: (nodeId: string, url: string) => void,
+    onError: (msg: string) => void,
+  ) => Promise<void>;
+  processingStep: string;
+  processingProgress: number;
 }
 
 type UploadStatus = "idle" | "uploading" | "processing" | "error";
 
 const ALLOWED_EXTENSIONS = [".dxf", ".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".tif"];
 
-export function UploadPanel({ onSessionCreated, onProcessingComplete: _onComplete }: UploadPanelProps) {
+const PIPELINE_STEPS = [
+  { key: "PARSING",      label: "ファイル解析中",    pct: 20 },
+  { key: "AI_ANALYZING", label: "AI図面解釈中", pct: 55 },
+  { key: "BUILDING",     label: "3Dモデル構築中",   pct: 70 },
+  { key: "OPTIMIZING",   label: "形状最適化中",   pct: 90 },
+  { key: "VALIDATING",   label: "品質検証中",    pct: 95 },
+];
+
+export function UploadPanel({ idToken, onSessionCreated, onProcessingComplete, onProcessingStart, processingStep, processingProgress }: UploadPanelProps) {
+  const authHeader = { Authorization: `Bearer ${idToken}` };
+
   const [status, setStatus] = useState<UploadStatus>("idle");
   const [projectName, setProjectName] = useState("");
   const [files, setFiles] = useState<File[]>([]);
@@ -44,7 +62,7 @@ export function UploadPanel({ onSessionCreated, onProcessingComplete: _onComplet
       // 1. Create session
       const sessionRes = await fetch(`${API_BASE}/sessions`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeader },
         body: JSON.stringify({ project_name: projectName || "Untitled" }),
       });
       if (!sessionRes.ok) throw new Error("セッション作成に失敗しました");
@@ -59,7 +77,7 @@ export function UploadPanel({ onSessionCreated, onProcessingComplete: _onComplet
           `${API_BASE}/sessions/${session.session_id}/upload`,
           {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { "Content-Type": "application/json", ...authHeader },
             body: JSON.stringify({
               filename: file.name,
               content_type: file.type || "application/octet-stream",
@@ -78,15 +96,26 @@ export function UploadPanel({ onSessionCreated, onProcessingComplete: _onComplet
         if (!putRes.ok) throw new Error(`${file.name} のアップロードに失敗しました`);
       }
 
-      // 3. Start processing
+      // 3. WebSocket 接続を先に確立してからパイプラインを起動（競合状態防止）
       setStatus("processing");
+      await onProcessingStart(
+        session.session_id,
+        (nid, url) => {
+          setStatus("idle");
+          onProcessingComplete(nid, url);
+        },
+        (msg) => {
+          setError(msg);
+          setStatus("error");
+        },
+      );
+
+      // 4. WebSocket 接続確立後に処理を開始
       const processRes = await fetch(
         `${API_BASE}/sessions/${session.session_id}/process`,
-        { method: "POST" },
+        { method: "POST", headers: authHeader },
       );
       if (!processRes.ok) throw new Error("処理の開始に失敗しました");
-
-      // Processing started - WebSocket will notify completion
     } catch (err) {
       setError(err instanceof Error ? err.message : "エラーが発生しました");
       setStatus("error");
@@ -160,9 +189,46 @@ export function UploadPanel({ onSessionCreated, onProcessingComplete: _onComplet
         )}
 
         {status === "processing" && sessionId && (
-          <p className="rounded-lg bg-blue-50 px-4 py-2 text-sm text-blue-700" role="status">
-            処理中... セッションID: {sessionId}
-          </p>
+          <div className="space-y-3">
+            <div className="flex items-center justify-between text-sm">
+              <span className="font-medium text-blue-700">
+                {PIPELINE_STEPS.find((s) => s.key === processingStep)?.label
+                  ?? (processingStep === "" ? "処理開始中..." : "処理中...")}
+              </span>
+              <span className="tabular-nums text-blue-600">{processingProgress}%</span>
+            </div>
+            <div className="h-2 w-full overflow-hidden rounded-full bg-blue-100" role="progressbar" aria-valuenow={processingProgress} aria-valuemin={0} aria-valuemax={100}>
+              <div
+                className="h-full rounded-full bg-blue-500 transition-all duration-700 ease-out"
+                style={{ width: `${processingProgress}%` }}
+              />
+            </div>
+            <ol className="flex justify-between" aria-label="パイプラインステップ">
+              {PIPELINE_STEPS.map((step) => {
+                const done = processingProgress >= step.pct;
+                const active = processingStep === step.key;
+                return (
+                  <li key={step.key} className="flex flex-col items-center gap-0.5">
+                    <span
+                      className={`flex h-5 w-5 items-center justify-center rounded-full text-xs font-bold transition-colors duration-500 ${
+                        done
+                          ? "bg-blue-500 text-white"
+                          : active
+                            ? "ring-2 ring-blue-400 bg-blue-100 text-blue-600"
+                            : "bg-gray-200 text-gray-400"
+                      }`}
+                      aria-hidden="true"
+                    >
+                      {done ? "✓" : PIPELINE_STEPS.indexOf(step) + 1}
+                    </span>
+                    <span className={`text-[10px] leading-tight text-center ${done || active ? "text-blue-600" : "text-gray-400"}`}>
+                      {step.label.replace("中", "")}
+                    </span>
+                  </li>
+                );
+              })}
+            </ol>
+          </div>
         )}
 
         <button
