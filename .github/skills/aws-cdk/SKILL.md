@@ -1,163 +1,20 @@
 ---
-name: aws-ops
-description: AWS環境特有の運用・開発ルール
+name: aws-cdk
+description: AWS CDK（Python）によるインフラ構築・デプロイ（Infrastructure as Code）
 ---
 
 ## 0. 目的
 
-本プロンプトは、AIに対してAWSサーバーレスシステムの設計・実装・デプロイ・運用を**迷いなく一貫して**実行させるための Skills / 行動規範定義である。
+本スキルは、AWS CDK を使用したインフラストラクチャの宣言的定義・デプロイを安全かつ効率的に実行するためのベストプラクティスを定義する。
 
-- dev / prod の厳密な自律実行境界
-- コスト最適化（特にBedrock系）
-- 差分デプロイによる高速・安全な運用
-- 人間がレビュー・実行しやすい成果物の提示
-
----
-
-## 1. エンジニアとしての役割と倫理規定
-
-あなたは **AWSサーバーレスに精通したシニアDevOps / フルスタックエンジニア** として振る舞う。
-
-### 1.1 自律実行の境界線（絶対遵守）
-
-| 環境 | 許可される行為                                                                   |
-| ---- | -------------------------------------------------------------------------------- |
-| dev  | CloudFormation deploy / Lambda更新 / API Gateway deploy / テスト実行を自律実行可 |
-| prod | 一切の実行禁止。スクリプト生成・実行コマンド提示・影響範囲説明まで               |
+- **IaC 一元管理**: CDK（Python）でクラウドリソースを定義
+- **環境分離**: dev / prod の厳密な分離制御
+- **差分デプロイ**: `cdk diff` による安全な段階的デプロイ
+- **自動化**: Lambda パッケージング・Layer 管理の自動化
 
 ---
 
-## 2. システム構成
-
-- Frontend: CloudFront + S3（React / Vue / SPA）
-- Backend: API Gateway + 複数Lambda（Python 3.12）
-- Auth: Cognito User Pool
-- DB: DynamoDB
-- AI: Bedrock Knowledge Base / Agent
-- Security: WAF（CloudFront適用、Web ACL共有可）
-
----
-
-## 3. 環境戦略・命名規則
-
-- 環境: dev / prod
-- CDKスタックは環境ごとに完全分離
-- 命名規則（強制）:
-
-```
-${ProjectName}-${Environment}-${ResourceType}
-```
-
-**例**:
-
-```
-myapp-dev-lambda
-myapp-dev-network
-myapp-prod-lambda
-myapp-prod-network
-```
-
-- CDK リソース ID（スタック内）も同じ規則に従う
-
----
-
-## 3.1 Lambda AI/モック切り替えの柔軟性（重要）
-
-### 原則
-
-- Lambda環境変数（USE_MOCK_AI, USE_MOCK_RAG）は**環境（dev/prod）とは独立して切り替え可能**とする。
-- 開発環境でも本番AIのテストが必要な場合があるため、cdk contextで柔軟に制御する。
-
-### 実装方法
-
-**cdk.json**:
-
-```json
-{
-  "app": "python app.py",
-  "context": {
-    "environment": "dev",
-    "useMockAI": true
-  }
-}
-```
-
-**デプロイコマンド例**:
-
-```bash
-# dev環境でモックAI（デフォルト）
-cdk deploy --all --context environment=dev
-
-# dev環境で本番AI（テスト用）
-cdk deploy --all --context environment=dev --context useMockAI=false
-
-# prod環境で本番AI
-cdk deploy --all --context environment=prod --context useMockAI=false
-```
-
-**app.py での取得**:
-
-```python
-env_name = app.node.try_get_context("environment") or "dev"
-use_mock_ai = app.node.try_get_context("useMockAI")
-if use_mock_ai is None:
-    use_mock_ai = (env_name == "dev")  # デフォルト: devならtrue
-```
-
-**lambda_stack.py での環境変数設定**:
-
-```python
-common_env = {
-    "USE_MOCK_AI": "true" if use_mock_ai else "false",
-    # ...
-}
-```
-
----
-
-## 4. コスト絶対遵守ルール
-
-### 4.1 Bedrock Knowledge Base
-
-- dev環境では原則作成しない
-- 通常運用時:
-
-```python
-# Lambda環境変数で制御
-USE_MOCK_RAG=true  # dev環境
-USE_MOCK_RAG=false # prod環境（検証時のみ）
-```
-
-- KB検証時のみ CDK構成で一時スタック構築し、検証後は即削除
-
-### 4.2 CDK による Bedrock KB スタック（条件付き）
-
-```python
-# cdk/lib/stacks/bedrock_stack.py
-from aws_cdk import (
-    Stack,
-    aws_bedrock as bedrock,
-    aws_s3 as s3,
-)
-
-class BedrockStack(Stack):
-    def __init__(self, scope: Construct, id: str, env_name: str, **kwargs):
-        super().__init__(scope, id, **kwargs)
-
-        # prod環境かつ明示的に有効化した場合のみ
-        if env_name != "prod":
-            self.node.set_metadata("bedrock:disabled", True)
-            return
-
-        # Knowledge Base作成（prod環境のみ）
-        # ... Knowledge Base定義
-```
-
-- 本番検証時以外は、スタックをコメントアウトまたは無効化
-
----
-
-## 5. AWS CDK（Infrastructure as Code）による統一管理
+## 1. CDK プロジェクト構成
 
 ### 5.1 CDK + Lambda 統合戦略
 
@@ -812,55 +669,19 @@ jobs:
           npm run build
       - name: Deploy Frontend to S3
         run: |
-          aws s3 sync frontend/out s3://$(jq -r '."aichat-dev-frontend".FrontendBucketName' cdk/outputs.json)
+          aws s3 sync frontend/out s3://$(jq -r '."2dto3d-dev-frontend".FrontendBucketName' cdk/outputs.json)
 ```
 
 ---
 
-## 11. 最終原則
+## 参考: AWS 運用・コスト最適化
 
-- devは自律実行、prodは説明のみ（差分確認→コマンド提示）
-- CDK Deploy で自動化・効率化
-- 高額リソース（Bedrock KB等）は dev では原則作成しない
-- Lambda関数・CDKスタックを Git で一元管理
-- ログ・可観測性を最優先
-- 人間が安全に判断・実行できる状態を常に保つ
+AWS 環境の運用・セキュリティ・コスト最適化に関する詳細は、別スキル定義 **aws-operations/SKILL.md** を参照してください。
 
----
-
-## 12. AWS 特有の運用原則
-
-- **CLI 認証**: AWS CLI を使用する場合はコマンド出力前に認証状況を確認すること。
-- **自動生成ファイル**: `lambda_package` は自動生成されるパッケージなので修正不要。
-
-## 13. API Gateway & Cognito 連携ルール
-
-- **CORS (OPTIONS) の認証除外**: API Gateway に Cognito Authorizer を導入する場合、ブラウザのプリフライトリクエスト (`OPTIONS`) は認証を通過できないため、`OPTIONS` メソッドの `AuthorizationType` は必ず `NONE` に設定すること。
-- **Authorization ヘッダー形式**: Cognito User Pool Authorizer を使用する場合、デフォルトでは `Authorization` ヘッダーに ID トークンを直接（`Bearer ` プレフィックスなしで）含める必要がある。
-- **デプロイの強制反映**: CloudFormation で API Gateway のメソッドやオーソライザーを変更した場合、ステージへの反映には新しい `AWS::ApiGateway::Deployment` リソースが必要になる。既存のデプロイリソース名を変更（例: `ApiGatewayDeploymentV2`）することで強制的に再デプロイをトリガーできる。
-- **テンプレートのエンコーディング**: CloudFormation テンプレートに日本語を含めると AWS CLI でのデプロイ時にエンコーディングエラーが発生する場合がある。可能な限り `Description` や `Parameter` の説明文には英語を使用し、ファイルは UTF-8 (BOM なし) で保存すること。
-
----
-
-## 14. Bedrock モデル ID の確認方法
-
-### 概要
-
-AWS Bedrock で利用可能な基礎モデル (Foundation Model) のモデル ID は、**リージョンごとに異なる場合があります**。特に新しいモデルは一部リージョンでのみ利用可能な場合があります。
-
-また、各モデルは **ON_DEMAND**（直接呼び出し）または **INFERENCE_PROFILE**（推論プロファイル経由）など、異なるスループット形式に対応しています。
-
-### スループット型（ON_DEMAND vs INFERENCE_PROFILE）の確認方法
-
-**重要**: モデルのスループット形式を確認しないまま Lambda にデプロイすると、`ValidationException - Invocation with on-demand throughput isn't supported` エラーが発生します。
-
-### 重要な注意点
-
-1. **モデル ID の形式**: モデル ID は `anthropic.claude-{model-family}-{version}:{variant}` の形式（例: `anthropic.claude-haiku-4-5-20251001-v1:0`）
-2. **スループット形式の重要性**: ON_DEMAND 対応のモデルのみを直接呼び出しできる。他のモデルは推論プロファイルを使用する必要がある
-
-- [AWS Bedrock Supported Models](https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html)
-- [AWS Bedrock Model IDs](https://docs.aws.amazon.com/bedrock/latest/userguide/model-ids.html)
+- 環境戦略・命名規則
+- コスト絶対遵守ルール（Bedrock KB 、ECS Fargate）
+- セキュリティ・IAM 最小権限の原則
+- モニタリング・アラート戦略
 
 ---
 

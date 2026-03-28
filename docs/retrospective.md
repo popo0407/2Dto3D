@@ -49,6 +49,33 @@
 | WebSocket URL | wss://mwrah9ladf.execute-api.ap-northeast-1.amazonaws.com/dev |
 | Cognito User Pool | ap-northeast-1_omw6GCY4N |
 
+---
+
+## 2026-03 スキル分割・デプロイScripting
+
+### 実施内容
+- **AWS スキルの分割**: `aws-ops` → `aws/SKILL.md` (CDK関連) + `aws-operations/SKILL.md` (運用関連)
+  - `aws/SKILL.md`: AWS CDK（Infrastructure as Code）・Lambda・Layer管理
+  - `aws-operations/SKILL.md`: 環境戦略・命名規則・コスト最適化・セキュリティ・IAM・モニタリング
+- **デプロイスクリプト実装**: フルデプロイメント自動化
+  - `scripts/deploy.ps1`: PowerShell版（Windows推奨）
+  - `scripts/deploy.py`: Python版（クロスプラットフォーム）
+  - 実行内容: 環境確認 → バックエンド構築・テスト → フロントエンド構築 → CDK初期化・Synth・Diff → デプロイ
+- **ドキュメント更新**:
+  - `.github/copilot-instructions.md`: スキル分割の反映、デプロイスクリプト説明追加
+  - `README.md`: デプロイスクリプト実行方法を追加
+
+### 発生した問題と対処
+
+| 問題 | 原因 | 対処 |
+|------|------|------|
+| AWS スキルが CDK・運用・セキュリティを混在 | スキル数が多すぎてユースケースが不明確 | ドメインで明確に分割（CDK機能vs運用ガバナンス） |
+
+### 改善策・再発防止
+- スキル数が多い場合は「機能別」「責務別」で明確に分割する
+- スキルは実装時に参照しやすい粒度（3-5ページ程度）を目指す
+- デプロイ自動化によって运用効率が大幅向上（dev環境は秒単位）
+
 ### 改善策・再発防止
 - Debian trixie 以降では `libgl1-mesa-glx` の代わりに `libgl1` を使用する
 - 長時間の CDK デプロイ（複数スタック）では SSO トークンの有効期限（通常1〜8時間）に注意し、期限内に完了できるか事前確認する

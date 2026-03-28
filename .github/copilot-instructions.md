@@ -45,7 +45,8 @@
 | **frontend/state-patterns.md**             | 状態管理・複雑な状態設計時                                                                                    |
 | **frontend/pencil-ui.md**                  | Pencil使用時のUI生成・編集時                                                                                  |
 | **refactoring.md**                         | 既存コード保守性向上時、技術的負債解消時、パフォーマンスチューニング時                                        |
-| **aws/SKILL.md**                           | AWS インフラ設計・CDK スタック実装時、Lambda関数デプロイ前、デプロイパイプライン構築時                        |
+| **aws-cdk/SKILL.md**                       | AWS CDK（Infrastructure as Code）デプロイ時、Lambda関数実装時、ECS Fargate設定時                         |
+| **aws-operations/SKILL.md**                | AWS運用・コスト最適化戦略検討時、セキュリティ・IAM権限設定時、本番環境デプロイ前                     |
 | **backend/SKILL.md**                       | Python バックエンド実装時、API エンドポイント設計時、DynamoDB操作実装時                                       |
 | **git/SKILL.md**                           | 機能ブランチ作成時、コミット実行時、Pull Request作成時、タスク完了後のGit操作時、**改善点・技術的負債検出時** |
 

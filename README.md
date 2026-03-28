@@ -18,12 +18,57 @@
 | インフラ | AWS CDK / Lambda / ECS Fargate / Step Functions / DynamoDB / S3 |
 | 認証 | Amazon Cognito |
 
+## 開発環境セットアップ
+
+### 🚀 フルデプロイメント（推奨）
+
+本プロジェクトは、バックエンド・フロントエンド・インフラストラクチャの完全自動デプロイをサポートしています。
+
+**PowerShell（Windows）**:
+```powershell
+.\scripts\deploy.ps1 -Environment dev -Action deploy
+```
+
+**Python（クロスプラットフォーム）**:
+```bash
+python scripts/deploy.py --environment dev --action deploy
+```
+
+### 📋 スクリプトの実行内容
+
+スクリプトは以下の処理を自動実行します：
+
+1. ✓ 前提条件チェック（Python 3.12, Node.js, AWS CLI）
+2. ✓ バックエンド環境構築（venv + 依存関係インストール）
+3. ✓ バックエンドテスト実行（pytest）
+4. ✓ フロントエンド構築（npm install + build）
+5. ✓ CDK初期化（venv + aws-cdk-lib インストール）
+6. ✓ CDK差分確認（cdk diff）
+7. ✓ CDK デプロイ実行（cdk deploy）
+
+### 個別実行
+
+```bash
+# バックエンド・フロントエンド環境構築のみ
+python scripts/deploy.py --action setup
+
+# テスト実行のみ
+python scripts/deploy.py --action test
+
+# CDK Synth確認のみ
+python scripts/deploy.py --action synth
+
+# スタック削除
+python scripts/deploy.py --action destroy --environment dev
+```
+
+詳細は [.github/copilot-instructions.md](file://.github/copilot-instructions.md#L30) を参照。
+
+---
+
 ## 開発ステータス
 
 現在、要件定義フェーズ。Bedrock Agent採用是非の協議中（[docs/requirements.md §8.3](docs/requirements.md) 参照）。
-# 2D to 3D AI 変換パイプライン
-
-2D図面（DXF/PDF/画像）をAI（Claude Sonnet 4.6）で解析し、CadQuery経由で3Dモデル（STEP/glTF）を自動生成するフルスタックWebアプリケーション。
 
 ## アーキテクチャ
 
