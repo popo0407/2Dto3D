@@ -183,6 +183,15 @@ class PipelineStack(Stack):
             previews_bucket.grant_read_write(task_definition.task_role)
             nodes_table.grant_read_write_data(task_definition.task_role)
             sessions_table.grant_read_write_data(task_definition.task_role)
+            connections_table.grant_read_data(task_definition.task_role)
+            task_definition.task_role.add_to_principal_policy(
+                iam.PolicyStatement(
+                    actions=["execute-api:ManageConnections"],
+                    resources=[
+                        f"arn:aws:execute-api:{self.region}:{self.account}:{websocket_api.api_id}/*"
+                    ],
+                )
+            )
 
             log_group = logs.LogGroup(
                 self,
@@ -319,6 +328,7 @@ class PipelineStack(Stack):
             cadquery_step,
             optimize_step,
             validate_step,
+            notify_step,
         ]:
             step_to_catch.add_catch(
                 error_step,

@@ -100,8 +100,11 @@ def execute_cadquery(script: str, work_dir: str) -> dict:
     """Execute CadQuery script and export STEP + glTF."""
     import cadquery as cq
 
-    # Execute script in restricted namespace
+    # Execute script in restricted namespace.
+    # __import__ is required for `import cadquery as cq` inside the script.
+    # Security is enforced by validate_script() (AST check) before this call.
     namespace = {"cq": cq, "__builtins__": {
+        "__import__": __import__,
         "range": range, "len": len, "int": int, "float": float,
         "str": str, "list": list, "dict": dict, "tuple": tuple,
         "True": True, "False": False, "None": None,

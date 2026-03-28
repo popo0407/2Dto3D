@@ -112,8 +112,8 @@ def lambda_handler(event: dict, context) -> dict:
     try:
         validate_cadquery_script(cadquery_script)
     except ScriptValidationError as e:
-        logger.warning("Script validation failed: %s", e)
-        cadquery_script = ""
+        logger.error("Script validation failed: %s", e)
+        raise RuntimeError(f"AI generated script failed validation: {e}") from e
 
     # Update node with AI results
     nodes_table = dynamodb.Table(NODES_TABLE)

@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/auth.ts","./src/config.ts","./src/main.tsx","./src/vite-env.d.ts","./src/components/chatpanel.tsx","./src/components/historypanel.tsx","./src/components/loginpanel.tsx","./src/components/uploadpanel.tsx","./src/components/viewer3d.tsx"],"version":"5.7.3"}

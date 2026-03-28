@@ -59,6 +59,7 @@ def lambda_handler(event: dict, context) -> dict:
     gltf_key = node.get("gltf_s3_key", "")
 
     optimized = False
+    preview_key = ""
 
     # If STEP file exists, generate a preview-optimized copy
     if step_key:
