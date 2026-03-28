@@ -78,6 +78,31 @@
 
 ### 改善策・再発防止
 - Debian trixie 以降では `libgl1-mesa-glx` の代わりに `libgl1` を使用する
+
+---
+
+## 2026-03 GLTFロード CORS エラー修正
+
+### 発生した問題
+3Dビューアでプレビュー GLTF ファイルのロードが失敗し、`THREE.WebGLRenderer: Context Lost.` が発生。
+
+### 根本原因
+
+| 問題 | 原因 |
+|------|------|
+| `Error: Could not load ... preview.gltf: Failed to fetch` | `previews_bucket` に CORS 設定がなく、`Origin: https://d3azdxpj50obab.cloudfront.net` からのクロスオリジン GET リクエストがブラウザにブロックされた |
+| HDR ファイル 301 リダイレクト | `Stage environment="city"` が `raw.githack.com/pmndrs/drei-assets/...` から外部 HDR を取得していた。外部 CDN への依存と 301 リダイレクトが問題 |
+
+### 対処
+
+| 対処 | ファイル |
+|------|----------|
+| `previews_bucket` に `GET` メソッドの CORS ルールを追加 | `cdk/lib/stacks/network_stack.py` |
+| `Stage environment="city"` を除去し、`ambientLight` + `directionalLight` による組み込みライティングに置換（外部 HDR 取得を廃止） | `frontend/src/components/Viewer3D.tsx` |
+
+### 再発防止
+- クロスオリジンで読み込む S3 バケット（previews等）は必ず `cors` ルールを設定する
+- `@react-three/drei` の `Stage` / `Environment` は外部 CDN へのフェッチが発生する。外部依存は避け、組み込みライティングか自己ホスト HDR を使用する
 - 長時間の CDK デプロイ（複数スタック）では SSO トークンの有効期限（通常1〜8時間）に注意し、期限内に完了できるか事前確認する
 - 認証情報が切れた場合は `cdk deploy <StackName>` で失敗したスタックのみ再デプロイ可能
 

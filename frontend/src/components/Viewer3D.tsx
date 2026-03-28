@@ -1,5 +1,5 @@
 import { Canvas } from "@react-three/fiber";
-import { OrbitControls, Stage, Grid, useGLTF } from "@react-three/drei";
+import { OrbitControls, Grid, useGLTF, Center } from "@react-three/drei";
 import { Suspense } from "react";
 
 interface ConfidenceEntry {
@@ -81,9 +81,12 @@ export function Viewer3D({ gltfUrl, confidenceMap = {} }: Viewer3DProps) {
         gl={{ antialias: true }}
       >
         <Suspense fallback={null}>
-          <Stage environment="city" intensity={0.5}>
+          <ambientLight intensity={0.6} />
+          <directionalLight position={[10, 10, 5]} intensity={1.2} />
+          <directionalLight position={[-5, -5, -5]} intensity={0.4} />
+          <Center>
             {gltfUrl ? <GltfModel url={gltfUrl} /> : <ModelPlaceholder />}
-          </Stage>
+          </Center>
         </Suspense>
         <OrbitControls makeDefault />
         <Grid
