@@ -88,46 +88,5 @@ class BedrockClient:
         return result["content"][0]["text"]
 
 
-class MockBedrockClient:
-    """dev環境のモックAIクライアント"""
-
-    def invoke_multimodal(
-        self,
-        prompt: str,
-        image_bytes: Optional[bytes] = None,
-        context_json: Optional[dict] = None,
-        system_prompt: str = "",
-        max_tokens: int = 4096,
-    ) -> str:
-        logger.info("[MOCK] Bedrock invocation with prompt length=%d", len(prompt))
-        return json.dumps(
-            {
-                "cadquery_script": _MOCK_CADQUERY_SCRIPT,
-                "confidence_map": {
-                    "Feature-001": 0.95,
-                    "Feature-002": 0.80,
-                },
-                "questions": [],
-            },
-            ensure_ascii=False,
-        )
-
-
-_MOCK_CADQUERY_SCRIPT = '''import cadquery as cq
-
-# Feature-001: 基底矩形板
-BASE_WIDTH = 100.0   # mm
-BASE_HEIGHT = 50.0   # mm
-BASE_DEPTH = 20.0    # mm
-base = cq.Workplane("XY").box(BASE_WIDTH, BASE_HEIGHT, BASE_DEPTH)
-
-# Feature-002: 貫通穴
-HOLE_DIAMETER = 6.0  # mm
-result = base.faces(">Z").workplane().hole(HOLE_DIAMETER)
-'''
-
-
-def get_bedrock_client(use_mock: bool, region: str = "ap-northeast-1"):
-    if use_mock:
-        return MockBedrockClient()
+def get_bedrock_client(region: str = "ap-northeast-1") -> BedrockClient:
     return BedrockClient(region=region)

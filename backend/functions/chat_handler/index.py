@@ -16,7 +16,6 @@ SESSIONS_TABLE = os.environ.get("SESSIONS_TABLE", "")
 NODES_TABLE = os.environ.get("NODES_TABLE", "")
 ARTIFACTS_BUCKET = os.environ.get("ARTIFACTS_BUCKET", "")
 PROCESSING_QUEUE_URL = os.environ.get("PROCESSING_QUEUE_URL", "")
-USE_MOCK_AI = os.environ.get("USE_MOCK_AI", "true").lower() == "true"
 BEDROCK_REGION = os.environ.get("BEDROCK_REGION", "ap-northeast-1")
 
 dynamodb = boto3.resource("dynamodb")
@@ -72,8 +71,12 @@ def lambda_handler(event: dict, context) -> dict:
     # Invoke AI
     from common.bedrock_client import get_bedrock_client
 
-    client = get_bedrock_client(use_mock=USE_MOCK_AI, region=BEDROCK_REGION)
-    raw_response = client.invoke_multimodal(prompt=prompt)
+    try:
+        client = get_bedrock_client(region=BEDROCK_REGION)
+        raw_response = client.invoke_multimodal(prompt=prompt)
+    except Exception as e:
+        logger.error("Bedrock invocation failed: %s", e)
+        return _response(502, {"error": f"AI invocation failed: {e}"})
 
     # Parse response
     ai_output = _parse_ai_response(raw_response)

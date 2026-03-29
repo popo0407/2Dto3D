@@ -23,7 +23,6 @@ def aws_env(monkeypatch):
     monkeypatch.setenv("ARTIFACTS_BUCKET", "test-artifacts")
     monkeypatch.setenv("PREVIEWS_BUCKET", "test-previews")
     monkeypatch.setenv("PROCESSING_QUEUE_URL", "")
-    monkeypatch.setenv("USE_MOCK_AI", "true")
     monkeypatch.setenv("BEDROCK_REGION", "ap-northeast-1")
     monkeypatch.setenv("ENV_NAME", "dev")
     monkeypatch.setenv("PROJECT_NAME", "2dto3d")
