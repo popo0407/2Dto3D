@@ -6,6 +6,7 @@ import logging
 import os
 import time
 import uuid
+from decimal import Decimal
 
 import boto3
 
@@ -81,7 +82,7 @@ def lambda_handler(event: dict, context) -> dict:
     # Parse response
     ai_output = _parse_ai_response(raw_response)
     new_script = ai_output.get("cadquery_script", parent_script)
-    confidence_map = ai_output.get("confidence_map", parent_node.get("confidence_map", {}))
+    confidence_map = _to_decimal(ai_output.get("confidence_map", parent_node.get("confidence_map", {})))
 
     # Validate
     from common.script_validator import validate_cadquery_script, ScriptValidationError
@@ -159,6 +160,17 @@ def _parse_ai_response(raw: str) -> dict:
             pass
 
     return {"cadquery_script": "", "confidence_map": {}, "diff_summary": ""}
+
+
+def _to_decimal(obj):
+    """Recursively convert float values to Decimal for DynamoDB compatibility."""
+    if isinstance(obj, float):
+        return Decimal(str(obj))
+    if isinstance(obj, dict):
+        return {k: _to_decimal(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_to_decimal(v) for v in obj]
+    return obj
 
 
 def _response(status_code: int, body: dict) -> dict:

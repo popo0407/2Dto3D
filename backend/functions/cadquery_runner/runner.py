@@ -135,8 +135,12 @@ def execute_cadquery(script: str, work_dir: str) -> dict:
     cq.exporters.export(result, stl_path, exportType="STL")
 
     import trimesh
+    import numpy as np
 
     mesh = trimesh.load(stl_path)
+    # Ensure vertex normals exist for proper lighting in Three.js
+    if hasattr(mesh, 'vertex_normals'):
+        mesh.vertex_normals  # trigger computation
     mesh.export(glb_path, file_type="glb")
 
     return {

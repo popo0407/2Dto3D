@@ -7,6 +7,8 @@ interface ChatPanelProps {
   idToken: string;
   /** チャット送信後、パイプライン再実行のために新 nodeId を親へ通知する */
   onChatNodeCreated?: (newNodeId: string) => void;
+  /** 3Dビューアで選択中の要素情報（AIへのコンテキストとして送信） */
+  selectionContext?: string;
 }
 
 interface ChatMessage {
@@ -14,7 +16,7 @@ interface ChatMessage {
   content: string;
 }
 
-export function ChatPanel({ sessionId, nodeId, idToken, onChatNodeCreated }: ChatPanelProps) {
+export function ChatPanel({ sessionId, nodeId, idToken, onChatNodeCreated, selectionContext }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -28,12 +30,15 @@ export function ChatPanel({ sessionId, nodeId, idToken, onChatNodeCreated }: Cha
     setLoading(true);
 
     try {
+      const messageToSend = selectionContext
+        ? `[選択中の要素: ${selectionContext}] ${userMessage}`
+        : userMessage;
       const res = await fetch(
         `${API_BASE}/sessions/${sessionId}/nodes/${nodeId}/chat`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
-          body: JSON.stringify({ message: userMessage }),
+          body: JSON.stringify({ message: messageToSend }),
         },
       );
       if (!res.ok) throw new Error("チャットリクエストに失敗しました");
@@ -80,6 +85,11 @@ export function ChatPanel({ sessionId, nodeId, idToken, onChatNodeCreated }: Cha
           <p className="text-center text-xs text-gray-400 py-4">
             モデルの修正指示を入力してください
           </p>
+        )}
+        {selectionContext && (
+          <div className="mx-2 rounded bg-orange-50 border border-orange-200 px-3 py-1.5 text-xs text-orange-700">
+            🎯 選択中: {selectionContext}
+          </div>
         )}
         {messages.map((msg, i) => (
           <div

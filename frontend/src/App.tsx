@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback } from "react";
-import { Viewer3D } from "./components/Viewer3D";
+import { Viewer3D, type SelectionInfo } from "./components/Viewer3D";
 import { UploadPanel } from "./components/UploadPanel";
 import { ChatPanel } from "./components/ChatPanel";
 import { HistoryPanel } from "./components/HistoryPanel";
@@ -40,6 +40,7 @@ export default function App() {
   const [processingProgress, setProcessingProgress] = useState<number>(0);
   const [confidenceMap, setConfidenceMap] = useState<Record<string, number>>({});
   const [aiQuestions, setAiQuestions] = useState<AiQuestion[]>([]);
+  const [selection, setSelection] = useState<SelectionInfo | null>(null);
 
   // WebSocket ref（セッションをまたいで保持）
   const wsRef = useRef<WebSocket | null>(null);
@@ -227,6 +228,7 @@ export default function App() {
                 gltfUrl={gltfUrl}
                 confidenceMap={confidenceMap}
                 onDownloadStep={nodeId ? () => handleDownloadStep(sessionId, nodeId, idToken) : undefined}
+                onSelectionChange={setSelection}
               />
             </section>
             <aside className="flex w-80 flex-col border-l bg-white" aria-label="サイドパネル">
@@ -260,6 +262,11 @@ export default function App() {
                 nodeId={nodeId}
                 idToken={idToken}
                 onChatNodeCreated={(newNodeId) => handleChatNodeCreated(sessionId, newNodeId)}
+                selectionContext={
+                  selection
+                    ? `${selection.meshName} (W:${selection.dimensions.width} H:${selection.dimensions.height} D:${selection.dimensions.depth})`
+                    : undefined
+                }
               />
               <HistoryPanel sessionId={sessionId} onNodeSelect={setNodeId} idToken={idToken} />
             </aside>
