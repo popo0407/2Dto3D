@@ -129,42 +129,42 @@ def execute_cadquery(script: str, work_dir: str) -> dict:
     step_path = os.path.join(work_dir, "output.step")
     cq.exporters.export(result, step_path, exportType="STEP")
 
-    # Export glTF via STL → trimesh → glTF pipeline
+    # Export GLB via STL → trimesh → GLB pipeline (single binary, no external .bin)
     stl_path = os.path.join(work_dir, "output.stl")
-    gltf_path = os.path.join(work_dir, "output.gltf")
+    glb_path = os.path.join(work_dir, "output.glb")
     cq.exporters.export(result, stl_path, exportType="STL")
 
     import trimesh
 
     mesh = trimesh.load(stl_path)
-    mesh.export(gltf_path, file_type="gltf")
+    mesh.export(glb_path, file_type="glb")
 
     return {
         "step_path": step_path,
-        "gltf_path": gltf_path,
+        "glb_path": glb_path,
         "step_size": os.path.getsize(step_path),
-        "gltf_size": os.path.getsize(gltf_path),
+        "glb_size": os.path.getsize(glb_path),
     }
 
 
 def upload_artifacts(work_dir_result: dict) -> dict:
-    """Upload STEP and glTF files to S3."""
+    """Upload STEP and GLB files to S3."""
     step_key = f"artifacts/{SESSION_ID}/{NODE_ID}/output.step"
-    gltf_key = f"artifacts/{SESSION_ID}/{NODE_ID}/output.gltf"
+    glb_key = f"artifacts/{SESSION_ID}/{NODE_ID}/output.glb"
 
     s3_client.upload_file(
         work_dir_result["step_path"], ARTIFACTS_BUCKET, step_key,
         ExtraArgs={"ContentType": "application/step"},
     )
     s3_client.upload_file(
-        work_dir_result["gltf_path"], ARTIFACTS_BUCKET, gltf_key,
-        ExtraArgs={"ContentType": "model/gltf+json"},
+        work_dir_result["glb_path"], ARTIFACTS_BUCKET, glb_key,
+        ExtraArgs={"ContentType": "model/gltf-binary"},
     )
 
-    logger.info("Uploaded STEP (%d bytes) and glTF (%d bytes)",
-                work_dir_result["step_size"], work_dir_result["gltf_size"])
+    logger.info("Uploaded STEP (%d bytes) and GLB (%d bytes)",
+                work_dir_result["step_size"], work_dir_result["glb_size"])
 
-    return {"step_s3_key": step_key, "gltf_s3_key": gltf_key}
+    return {"step_s3_key": step_key, "gltf_s3_key": glb_key}
 
 
 def update_node(s3_keys: dict) -> None:
