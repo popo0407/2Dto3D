@@ -63,20 +63,28 @@ def lambda_handler(event: dict, context) -> dict:
 
 【穴の方向ルール】
 - `.hole()` はデフォルトで現在のワークプレーンの法線方向に穴を開ける
-- X方向の穴: `.faces(">X")` or `.faces("<X")` のワークプレーンで `.hole()`
-- Y方向の穴: `.faces(">Y")` or `.faces("<Y")` のワークプレーンで `.hole()`
-- Z方向の穴: `.faces(">Z")` or `.faces("<Z")` のワークプレーンで `.hole()`
+- **穴を開ける面（ドリル面）を必ず `.faces("...").workplane()` で指定すること**
+  - Z方向の穴: `.faces(">Z").workplane()` or `.faces("<Z").workplane()` で `.hole()`
+  - Y方向の穴: `.faces(">Y").workplane()` or `.faces("<Y").workplane()` で `.hole()`
+  - X方向の穴: `.faces(">X").workplane()` or `.faces("<X").workplane()` で `.hole()`
 - 穴が貫通穴か止まり穴かは図面の指示に従う（無条件に貫通穴と仮定しないこと）
+- **`.faces("...").workplane()` を省略すると穴の位置・方向が狂うので絶対に省略しないこと**
+
+【穴のグループ化ルール】
+- 同じドリル面・同じ径・同じ深さの穴はグループにまとめ `.pushPoints()` で一括処理する
+- 穴が1個でも `.pushPoints([(x, y)]).hole(d)` の形式で統一する
+- 穴あけは必ず `.faces("...").workplane().pushPoints([...]).hole(d)` 形式（例外なし）
 
 【CadQuery座標系の注意】
 - `.box()` は原点中心に生成される（左端=-W/2, 右端=+W/2, 下端=-H/2, 上端=+H/2）
-- 穴位置を `.center(x, y)` で指定するとき、CadQuery原点（=箱の中心）からの相対座標を使うこと
+- 穴位置を指定するとき、CadQuery原点（=箱の中心）からの相対座標を使うこと
 
 【ルール】
 - 修正後の完全なスクリプトを出力する（差分ではなく全体）
 - show_object() は使用禁止
 - 各フィーチャーに `# Feature-NNN:` コメントを付ける
-- 穴は通し番号 `# Hole-NNN:` で管理する（番号・径・方向・貫通/止まり・座標を記載）
+- 穴は通し番号 `# Hole-NNN:` で管理する（番号・径・方向・貫通/止まり・ドリル面・座標を記載）
+- 同一面・同一径・同一深さの穴はグループ化: `# Hole Group A: ...`
 
 【出力フォーマット(JSON)】
 {{
