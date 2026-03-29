@@ -150,6 +150,24 @@ export default function App() {
     _fetchNodeConfidenceMap(nid, sessionId, idToken, setConfidenceMap);
   };
 
+  const handleDownloadStep = async (sid: string, nid: string, token: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/sessions/${sid}/nodes/${nid}/download?format=step`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error("STEP取得に失敗");
+      const data = (await res.json()) as { download_url?: string };
+      if (data.download_url) {
+        const a = document.createElement("a");
+        a.href = data.download_url;
+        a.download = "model.step";
+        a.click();
+      }
+    } catch (e) {
+      console.error("STEP download failed:", e);
+    }
+  };
+
   return (
     <div className="flex h-screen flex-col bg-gray-50">
       <header className="flex h-14 shrink-0 items-center border-b bg-white px-6">
@@ -205,7 +223,11 @@ export default function App() {
         ) : (
           <>
             <section className="flex flex-1 flex-col" aria-label="3Dビューア">
-              <Viewer3D gltfUrl={gltfUrl} confidenceMap={confidenceMap} />
+              <Viewer3D
+                gltfUrl={gltfUrl}
+                confidenceMap={confidenceMap}
+                onDownloadStep={nodeId ? () => handleDownloadStep(sessionId, nodeId, idToken) : undefined}
+              />
             </section>
             <aside className="flex w-80 flex-col border-l bg-white" aria-label="サイドパネル">
               {aiQuestions.length > 0 && (

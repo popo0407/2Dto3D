@@ -78,25 +78,34 @@ def lambda_handler(event: dict, context) -> dict:
 
     # Load first image for multimodal analysis
     image_bytes = None
+    image_media_type = "image/png"
     image_keys = parsed_data.get("image_keys", [])
     if image_keys:
         try:
             obj = s3_client.get_object(Bucket=UPLOADS_BUCKET, Key=image_keys[0])
             image_bytes = obj["Body"].read()
+            # Detect media type from extension
+            ext = image_keys[0].rsplit(".", 1)[-1].lower() if "." in image_keys[0] else "png"
+            media_map = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "tiff": "image/tiff", "tif": "image/tiff"}
+            image_media_type = media_map.get(ext, "image/png")
         except Exception as e:
             logger.warning("Failed to load image %s: %s", image_keys[0], e)
 
-    # Build prompt
-    prompt = _build_prompt(parsed_data)
+    # Build prompt (image-specific when raster input)
+    has_image = image_bytes is not None
+    has_dxf = any(f.get("type") == "vector_cad" for f in parsed_data.get("files", []))
+    prompt = _build_image_prompt() if has_image and not has_dxf else _build_prompt(parsed_data)
 
     # Invoke AI
     from common.bedrock_client import get_bedrock_client
 
     client = get_bedrock_client(region=BEDROCK_REGION)
+    context_json = parsed_data.get("files") if has_dxf else None
     raw_response = client.invoke_multimodal(
         prompt=prompt,
         image_bytes=image_bytes,
-        context_json=parsed_data.get("files"),
+        image_media_type=image_media_type,
+        context_json=context_json,
     )
 
     # Parse AI response
@@ -140,7 +149,38 @@ def lambda_handler(event: dict, context) -> dict:
     }
 
 
+def _build_image_prompt() -> str:
+    """Image-only analysis prompt: let the AI focus on reading the drawing visually."""
+    return """添付の2D図面画像を正確に読み取り、3Dモデルを生成するCadQueryスクリプトを作成してください。
+
+【図面読み取りの指示】
+① まず図面上のすべての寸法値を一つずつ読み取ってリスト化してください
+② 図面中のビュー（正面図・平面図・側面図）を各々識別してください
+③ 円の数とサイズを正確に数えてください。「2x」「3x」などの表記は複数個を意味します
+④ Φ記号は直径、Rは半径です
+⑤ 点線（破線）は隠れ線（内部形状）、一点鎖線は中心線です
+⑥ 表題欄の情報（SCALE, DWG NO等）も参照してください
+
+【スクリプト作成ルール】
+- `import cadquery as cq` から始まる完全に実行可能なコードを書く
+- 各フィーチャーに `# Feature-NNN: 説明` コメントを付ける
+- すべての寸法を先頭に定数として定義する（マジックナンバー禁止）
+- 最終結果を `result` 変数に代入する
+- 穴の位置は図面の寸法から正確に計算する
+
+【出力フォーマット】
+JSONのみを出力してください。他の説明文は不要です。
+```json
+{{
+  "cadquery_script": "import cadquery as cq\\n...",
+  "confidence_map": {{"Feature-001": 0.95, "Feature-002": 0.80}},
+  "questions": []
+}}
+```"""
+
+
 def _build_prompt(parsed_data: dict) -> str:
+    """DXF-based analysis prompt with entity data."""
     files = parsed_data.get("files", [])
     file_desc = []
     for f in files:
@@ -157,29 +197,12 @@ def _build_prompt(parsed_data: dict) -> str:
 【入力ファイル】
 {file_summary}
 
-【設計意図推論の指示】
-1. 対称性の利用: 記載されていない半分は対称と扱い、完全形状を推定する
-2. 標準フィーチャー認識: ネジ穴は規格寸法（JIS/ISO）に補正する
-3. 製造制約の考慮: ドリル穴の底面は118°コーン底として処理する
-4. Water-tight保証: 全面が閉じたソリッドになるよう補完する
-5. 隠れ線処理: 点線は内部形状として解釈する
-6. 寸法の優先順位: 記入寸法 > 計算寸法（スケールから算出）
-
-【エンティティ解決（Entity Resolution）の指示】
-- 画像上の「円」とエンティティJSON内の「CIRCLE」を紐付け、同一形状かどうか判定する
-- 矛盾検出: 三面図（正面・平面・側面）の寸法が一致しない場合は質問リストに追加する
-- 判読不能箇所: OCRで読み取れない寸法は確度スコア0.5以下で記録し、質問を生成する
-
 【スクリプト作成ルール】
-- 各フィーチャーは `# Feature-NNN:` コメントで識別可能に記述する
+- `import cadquery as cq` から始まる完全に実行可能なコードを書く
+- 各フィーチャーに `# Feature-NNN:` コメントを付ける
 - すべての数値は意味のある定数として抽出する（マジックナンバー禁止）
-- コメントで出典図面・座標を記録する（トレーサビリティ）
-- 修正は定数書き換えのみで対応可能な構造にする
-
-【出力要件】
-1. CadQueryスクリプト（`import cadquery as cq` から始まる実行可能コード）
-2. 各Feature の確度スコア（0.0～1.0）
-3. 不明箇所への質問（最大5件、priority: high/medium/low付き）
+- 最終結果を `result` 変数に代入する
+- 点線は内部形状として解釈する
 
 【出力フォーマット(JSON)】
 {{
@@ -189,7 +212,7 @@ def _build_prompt(parsed_data: dict) -> str:
     {{
       "id": "Q1",
       "feature_id": "Feature-002",
-      "text": "正面図と側面図で穴の深さが矛盾しています。どちらが正しいですか？",
+      "text": "質問内容",
       "confidence": 0.45,
       "priority": "high"
     }}

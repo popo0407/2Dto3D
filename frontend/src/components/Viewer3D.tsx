@@ -10,6 +10,7 @@ interface ConfidenceEntry {
 interface Viewer3DProps {
   gltfUrl: string;
   confidenceMap?: Record<string, number>;
+  onDownloadStep?: () => void;
 }
 
 function GltfModel({ url }: { url: string }) {
@@ -69,7 +70,7 @@ function ConfidenceLegend({ entries }: { entries: ConfidenceEntry[] }) {
   );
 }
 
-export function Viewer3D({ gltfUrl, confidenceMap = {} }: Viewer3DProps) {
+export function Viewer3D({ gltfUrl, confidenceMap = {}, onDownloadStep }: Viewer3DProps) {
   const confidenceEntries: ConfidenceEntry[] = Object.entries(confidenceMap).map(
     ([featureId, score]) => ({ featureId, score }),
   );
@@ -101,8 +102,19 @@ export function Viewer3D({ gltfUrl, confidenceMap = {} }: Viewer3DProps) {
           infiniteGrid
         />
       </Canvas>
-      <div className="absolute bottom-4 left-4 rounded bg-gray-800/80 px-3 py-1.5 text-xs text-gray-300">
-        マウスドラッグ: 回転 / スクロール: ズーム / 右クリック: パン
+      <div className="absolute bottom-4 left-4 flex items-center gap-3">
+        <span className="rounded bg-gray-800/80 px-3 py-1.5 text-xs text-gray-300">
+          マウスドラッグ: 回転 / スクロール: ズーム / 右クリック: パン
+        </span>
+        {gltfUrl && onDownloadStep && (
+          <button
+            type="button"
+            onClick={onDownloadStep}
+            className="rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700"
+          >
+            ⬇ STEP ダウンロード
+          </button>
+        )}
       </div>
       {!gltfUrl && (
         <div className="absolute inset-0 flex items-center justify-center">

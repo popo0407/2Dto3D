@@ -39,9 +39,10 @@ class BedrockClient:
         self,
         prompt: str,
         image_bytes: Optional[bytes] = None,
+        image_media_type: str = "image/png",
         context_json: Optional[dict] = None,
         system_prompt: str = SYSTEM_PROMPT,
-        max_tokens: int = 4096,
+        max_tokens: int = 8192,
     ) -> str:
         content: list[dict] = []
 
@@ -51,7 +52,7 @@ class BedrockClient:
                     "type": "image",
                     "source": {
                         "type": "base64",
-                        "media_type": "image/png",
+                        "media_type": image_media_type,
                         "data": base64.b64encode(image_bytes).decode(),
                     },
                 }
