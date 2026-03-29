@@ -100,16 +100,24 @@ def execute_cadquery(script: str, work_dir: str) -> dict:
     """Execute CadQuery script and export STEP + glTF."""
     import cadquery as cq
 
+    import math
+
+    # No-op stubs for CadQuery GUI functions that AI may include
+    def _noop(*args, **kwargs):
+        pass
+
     # Execute script in restricted namespace.
     # __import__ is required for `import cadquery as cq` inside the script.
     # Security is enforced by validate_script() (AST check) before this call.
-    namespace = {"cq": cq, "__builtins__": {
+    namespace = {"cq": cq, "math": math, "show_object": _noop, "debug": _noop, "log": _noop, "__builtins__": {
         "__import__": __import__,
         "range": range, "len": len, "int": int, "float": float,
         "str": str, "list": list, "dict": dict, "tuple": tuple,
         "True": True, "False": False, "None": None,
         "print": print, "abs": abs, "min": min, "max": max,
         "round": round, "enumerate": enumerate, "zip": zip,
+        "map": map, "filter": filter, "sorted": sorted,
+        "isinstance": isinstance, "type": type, "bool": bool,
     }}
 
     exec(script, namespace)  # noqa: S102 - Script is validated before execution
