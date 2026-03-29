@@ -279,3 +279,25 @@ nodes_table.update_item(
   ```
 - Bedrock IAM ポリシードキュメント作成時は公式 AWS ドキュメント（Bedrock IAM permissions guide）を参照し、常に3つのアクションをセットで含める
 - Lambda エラーログが `aws-marketplace:` を含む場合は、CDK で定義した IAM ポリシーの action リストを確認し、AWS Marketplace 権限が含まれているか確認する、直接 `InvokeModel` には使えない
+
+---
+
+## 2026-03 穴方向プロンプト改善・面選択強化・確度情報削除
+
+### 実施内容
+- AIが生成するCadQueryスクリプトで穴の向きが誤る問題をプロンプト改善で対処
+- 3Dビューアの選択機能を面（face）/Feature単位に強化
+- 不要になった確度情報（confidence_map）をシステム全体から完全削除
+
+### 発生した問題と対処
+
+| 問題 | 原因 | 対処 |
+|------|------|------|
+| 穴の向きが正面図・側面図で逆方向に生成される | プロンプトに2D図面→3D軸方向のマッピングルールが不足 | `_build_image_prompt`・`_build_prompt`・chat promptに詳細な穴方向ルール（6方向×ワークプレーン選択）を追加 |
+| 3Dビューアで面やFeature単位の選択ができない | SelectionInfoにmeshName/positionのみで、normal/featureIdがなかった | SelectionTypeを追加、face normalの抽出、featureId正規表現抽出、方向ラベル表示を実装 |
+| confidence_mapが未使用のまま残存 | 初期設計で確度表示を想定していたが不要になった | backend（ai_analyze_handler, chat_handler, models.py）およびfrontend（Viewer3D, App.tsx）から完全削除 |
+
+### 改善策・再発防止
+- CadQueryスクリプト生成プロンプトには2D図面の投影方向→3D軸方向の明示的マッピングを必ず含める
+- 不要になった機能（確度表示等）はコード・プロンプト・モデル定義から漏れなく削除し、技術的負債を溜めない
+- 3Dインタラクションではface normalやfeatureIdを含むリッチな選択情報をチャットコンテキストに渡すことでAIの修正精度が向上する

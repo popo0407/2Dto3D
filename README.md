@@ -68,7 +68,7 @@ python scripts/deploy.py --action destroy --environment dev
 
 ## 開発ステータス
 
-現在、要件定義フェーズ。Bedrock Agent採用是非の協議中（[docs/requirements.md §8.3](docs/requirements.md) 参照）。
+3Dモデル生成パイプライン稼働中。穴方向AI推論・面/Feature選択・チャット編集が利用可能。
 
 ## アーキテクチャ
 

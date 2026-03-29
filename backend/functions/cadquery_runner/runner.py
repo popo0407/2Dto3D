@@ -140,15 +140,20 @@ def execute_cadquery(script: str, work_dir: str) -> dict:
     # Export GLB via STL → trimesh → GLB pipeline (single binary, no external .bin)
     stl_path = os.path.join(work_dir, "output.stl")
     glb_path = os.path.join(work_dir, "output.glb")
-    cq.exporters.export(result, stl_path, exportType="STL")
+    # High-resolution STL: small tolerances → smoother curved surfaces
+    cq.exporters.export(
+        result, stl_path, exportType="STL",
+        tolerance=0.01,       # linear tolerance 0.01mm
+        angularTolerance=0.1, # angular tolerance 0.1 radians (~6°)
+    )
 
     import trimesh
     import numpy as np
 
     mesh = trimesh.load(stl_path)
-    # Ensure vertex normals exist for proper lighting in Three.js
-    if hasattr(mesh, 'vertex_normals'):
-        mesh.vertex_normals  # trigger computation
+    # Re-merge coplanar faces to reduce visual artifacts on flat surfaces
+    if hasattr(mesh, 'merge_vertices'):
+        mesh.merge_vertices()
     mesh.export(glb_path, file_type="glb")
 
     return {

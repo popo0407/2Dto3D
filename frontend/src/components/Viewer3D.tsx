@@ -5,21 +5,20 @@ import * as THREE from "three";
 
 /* ---------- Shared types ---------- */
 
+export type SelectionType = "face" | "edge" | "mesh";
+
 export interface SelectionInfo {
+  type: SelectionType;
   meshName: string;
+  featureId?: string;
   position: { x: number; y: number; z: number };
+  normal?: { x: number; y: number; z: number };
   dimensions: { width: number; height: number; depth: number };
   faceIndex?: number;
 }
 
-interface ConfidenceEntry {
-  featureId: string;
-  score: number;
-}
-
 interface Viewer3DProps {
   gltfUrl: string;
-  confidenceMap?: Record<string, number>;
   onDownloadStep?: () => void;
   onSelectionChange?: (selection: SelectionInfo | null) => void;
 }
@@ -96,14 +95,26 @@ function SelectableModel({
 
       const box = new THREE.Box3().setFromObject(mesh);
       const sz = box.getSize(new THREE.Vector3());
+
+      // Extract face normal from the intersection
+      let faceNormal: { x: number; y: number; z: number } | undefined;
+      if (e.face) {
+        const n = e.face.normal.clone();
+        n.transformDirection(mesh.matrixWorld);
+        faceNormal = { x: +n.x.toFixed(4), y: +n.y.toFixed(4), z: +n.z.toFixed(4) };
+      }
+
       onMeshSelect(
         {
+          type: "face",
           meshName: mesh.name || `mesh_${mesh.id}`,
+          featureId: _extractFeatureId(mesh.name),
           position: {
             x: +e.point.x.toFixed(2),
             y: +e.point.y.toFixed(2),
             z: +e.point.z.toFixed(2),
           },
+          normal: faceNormal,
           dimensions: {
             width: +sz.x.toFixed(2),
             height: +sz.y.toFixed(2),
@@ -287,6 +298,20 @@ function ModelPlaceholder() {
   );
 }
 
+/* ---------- Helpers ---------- */
+
+function _extractFeatureId(name: string): string | undefined {
+  const m = name.match(/Feature-\d+/i);
+  return m ? m[0] : undefined;
+}
+
+function _normalToLabel(n: { x: number; y: number; z: number }): string {
+  const abs = { x: Math.abs(n.x), y: Math.abs(n.y), z: Math.abs(n.z) };
+  if (abs.x >= abs.y && abs.x >= abs.z) return n.x > 0 ? "+X面 (右)" : "-X面 (左)";
+  if (abs.y >= abs.x && abs.y >= abs.z) return n.y > 0 ? "+Y面 (上)" : "-Y面 (下)";
+  return n.z > 0 ? "+Z面 (前)" : "-Z面 (奥)";
+}
+
 /* ---------- Selection Info Panel ---------- */
 
 function SelectionPanel({ selection }: { selection: SelectionInfo | null }) {
@@ -294,6 +319,9 @@ function SelectionPanel({ selection }: { selection: SelectionInfo | null }) {
   return (
     <div className="absolute top-4 left-4 rounded bg-gray-900/80 p-3 text-xs text-gray-200 max-w-56">
       <p className="font-semibold text-orange-400 mb-1">選択中: {selection.meshName}</p>
+      {selection.featureId && (
+        <p className="text-cyan-400">Feature: {selection.featureId}</p>
+      )}
       <p>
         位置: ({selection.position.x}, {selection.position.y}, {selection.position.z})
       </p>
@@ -301,49 +329,10 @@ function SelectionPanel({ selection }: { selection: SelectionInfo | null }) {
         寸法: W{selection.dimensions.width} × H{selection.dimensions.height} × D
         {selection.dimensions.depth}
       </p>
+      {selection.normal && (
+        <p className="text-cyan-300">面方向: {_normalToLabel(selection.normal)}</p>
+      )}
       {selection.faceIndex != null && <p>面 #{selection.faceIndex}</p>}
-    </div>
-  );
-}
-
-/* ---------- Confidence Legend ---------- */
-
-function ConfidenceLegend({ entries }: { entries: ConfidenceEntry[] }) {
-  if (entries.length === 0) return null;
-
-  const avg = entries.reduce((s, e) => s + e.score, 0) / entries.length;
-  const overallColor =
-    avg >= 0.9 ? "bg-green-500" : avg >= 0.7 ? "bg-yellow-400" : "bg-orange-500";
-
-  return (
-    <div
-      className="absolute top-4 right-4 flex flex-col gap-1 rounded bg-gray-900/80 p-2 text-xs"
-      aria-label="確度スコア一覧"
-    >
-      <p className="font-semibold text-gray-200">
-        確度:{" "}
-        <span className={`rounded px-1 py-0.5 text-white ${overallColor}`}>
-          {(avg * 100).toFixed(0)}%
-        </span>
-      </p>
-      <ul className="mt-1 space-y-0.5">
-        {entries.map((e) => {
-          const color =
-            e.score >= 0.9
-              ? "bg-green-500"
-              : e.score >= 0.7
-                ? "bg-yellow-400"
-                : "bg-orange-500";
-          return (
-            <li key={e.featureId} className="flex items-center gap-2">
-              <span className={`h-2 w-2 rounded-full ${color}`} aria-hidden="true" />
-              <span className="text-gray-300">{e.featureId}</span>
-              <span className="ml-auto text-gray-400">{(e.score * 100).toFixed(0)}%</span>
-            </li>
-          );
-        })}
-      </ul>
-      <p className="mt-1 text-gray-500 text-[10px]">緑≥90% / 黄70-90% / 橙&lt;70%</p>
     </div>
   );
 }
@@ -360,16 +349,11 @@ const DIM_MODE_LABELS: Record<DimensionMode, string> = {
 
 export function Viewer3D({
   gltfUrl,
-  confidenceMap = {},
   onDownloadStep,
   onSelectionChange,
 }: Viewer3DProps) {
   const [dimensionMode, setDimensionMode] = useState<DimensionMode>("off");
   const [selection, setSelection] = useState<SelectionInfo | null>(null);
-
-  const confidenceEntries: ConfidenceEntry[] = Object.entries(confidenceMap).map(
-    ([featureId, score]) => ({ featureId, score }),
-  );
 
   const handleSelectionChange = useCallback(
     (info: SelectionInfo | null) => {
@@ -425,7 +409,7 @@ export function Viewer3D({
 
       <div className="absolute bottom-4 left-4 flex items-center gap-3">
         <span className="rounded bg-gray-800/80 px-3 py-1.5 text-xs text-gray-300">
-          クリック: 要素選択 / ドラッグ: 回転 / スクロール: ズーム
+          クリック: 面選択 / ドラッグ: 回転 / スクロール: ズーム
         </span>
         {gltfUrl && (
           <button
@@ -451,7 +435,6 @@ export function Viewer3D({
           <p className="text-sm text-gray-400">3Dモデルを生成すると表示されます</p>
         </div>
       )}
-      <ConfidenceLegend entries={confidenceEntries} />
     </div>
   );
 }

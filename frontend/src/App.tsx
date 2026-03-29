@@ -38,9 +38,9 @@ export default function App() {
   const [idToken, setIdToken] = useState<string>("");
   const [processingStep, setProcessingStep] = useState<string>("");
   const [processingProgress, setProcessingProgress] = useState<number>(0);
-  const [confidenceMap, setConfidenceMap] = useState<Record<string, number>>({});
   const [aiQuestions, setAiQuestions] = useState<AiQuestion[]>([]);
   const [selection, setSelection] = useState<SelectionInfo | null>(null);
+  const [chatPipelineComplete, setChatPipelineComplete] = useState(false);
 
   // WebSocket ref（セッションをまたいで保持）
   const wsRef = useRef<WebSocket | null>(null);
@@ -95,6 +95,7 @@ export default function App() {
   /** チャット編集後、新 node_id で WebSocket を再接続してパイプライン完了を待つ */
   const handleChatNodeCreated = useCallback(
     (sid: string, _newNodeId: string) => {
+      setChatPipelineComplete(false);
       setProcessingStep("BUILDING");
       setProcessingProgress(55);
       setView("viewer");
@@ -105,7 +106,9 @@ export default function App() {
           setGltfUrl(url);
           setProcessingStep("");
           setProcessingProgress(0);
-          _fetchNodeConfidenceMap(completedNodeId, sid, idToken, setConfidenceMap);
+          setChatPipelineComplete(true);
+          // 次回チャット変更に備えて少し遅延してリセット
+          setTimeout(() => setChatPipelineComplete(false), 500);
         },
         (err) => {
           console.error("Chat pipeline failed:", err);
@@ -131,7 +134,6 @@ export default function App() {
     setGltfUrl("");
     setProcessingStep("");
     setProcessingProgress(0);
-    setConfidenceMap({});
     setAiQuestions([]);
     setView("upload");
   };
@@ -148,7 +150,6 @@ export default function App() {
     setNodeId(nid);
     setGltfUrl(url);
     setView("viewer");
-    _fetchNodeConfidenceMap(nid, sessionId, idToken, setConfidenceMap);
   };
 
   const handleDownloadStep = async (sid: string, nid: string, token: string) => {
@@ -226,7 +227,6 @@ export default function App() {
             <section className="flex flex-1 flex-col" aria-label="3Dビューア">
               <Viewer3D
                 gltfUrl={gltfUrl}
-                confidenceMap={confidenceMap}
                 onDownloadStep={nodeId ? () => handleDownloadStep(sessionId, nodeId, idToken) : undefined}
                 onSelectionChange={setSelection}
               />
@@ -264,9 +264,19 @@ export default function App() {
                 onChatNodeCreated={(newNodeId) => handleChatNodeCreated(sessionId, newNodeId)}
                 selectionContext={
                   selection
-                    ? `${selection.meshName} (W:${selection.dimensions.width} H:${selection.dimensions.height} D:${selection.dimensions.depth})`
+                    ? [
+                        selection.meshName,
+                        selection.featureId ? `Feature: ${selection.featureId}` : "",
+                        `W:${selection.dimensions.width} H:${selection.dimensions.height} D:${selection.dimensions.depth}`,
+                        selection.normal
+                          ? `面方向: ${selection.normal.x > 0.5 ? "+X" : selection.normal.x < -0.5 ? "-X" : ""}${selection.normal.y > 0.5 ? "+Y" : selection.normal.y < -0.5 ? "-Y" : ""}${selection.normal.z > 0.5 ? "+Z" : selection.normal.z < -0.5 ? "-Z" : "斜面"}`
+                          : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" / ")
                     : undefined
                 }
+                pipelineComplete={chatPipelineComplete}
               />
               <HistoryPanel sessionId={sessionId} onNodeSelect={setNodeId} idToken={idToken} />
             </aside>
@@ -275,26 +285,4 @@ export default function App() {
       </main>
     </div>
   );
-}
-
-/** ノードの確度マップを API から取得して set する */
-async function _fetchNodeConfidenceMap(
-  nodeId: string,
-  sessionId: string,
-  idToken: string,
-  setter: (map: Record<string, number>) => void,
-): Promise<void> {
-  if (!nodeId || !sessionId) return;
-  try {
-    const res = await fetch(`${API_BASE}/sessions/${sessionId}/nodes/${nodeId}`, {
-      headers: { Authorization: `Bearer ${idToken}` },
-    });
-    if (!res.ok) return;
-    const data = (await res.json()) as { confidence_map?: Record<string, number> };
-    if (data.confidence_map && Object.keys(data.confidence_map).length > 0) {
-      setter(data.confidence_map);
-    }
-  } catch {
-    // サイレント無視（表示機能なので処理を止めない）
-  }
 }

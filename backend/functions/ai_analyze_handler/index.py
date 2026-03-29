@@ -8,7 +8,6 @@ import json
 import logging
 import os
 import time
-from decimal import Decimal
 
 import boto3
 from common.ws_notify import send_progress
@@ -23,17 +22,6 @@ BEDROCK_REGION = os.environ.get("BEDROCK_REGION", "ap-northeast-1")
 
 dynamodb = boto3.resource("dynamodb")
 s3_client = boto3.client("s3")
-
-
-def _to_decimal(obj):
-    """DynamoDB は float 非対応のため再帰的に Decimal へ変換する。"""
-    if isinstance(obj, float):
-        return Decimal(str(obj))
-    if isinstance(obj, dict):
-        return {k: _to_decimal(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_to_decimal(v) for v in obj]
-    return obj
 
 
 def lambda_handler(event: dict, context) -> dict:
@@ -59,7 +47,6 @@ def lambda_handler(event: dict, context) -> dict:
             "session_id": session_id,
             "node_id": node_id,
             "cadquery_script": existing_node.get("cadquery_script", ""),
-            "confidence_map": existing_node.get("confidence_map", {}),
         }
 
     send_progress(session_id, "AI_ANALYZING", 30, "AI図面解釈中...")
@@ -111,8 +98,6 @@ def lambda_handler(event: dict, context) -> dict:
     # Parse AI response
     ai_output = _parse_ai_response(raw_response)
     cadquery_script = ai_output.get("cadquery_script", "")
-    confidence_map = ai_output.get("confidence_map", {})
-    questions = ai_output.get("questions", [])
 
     # Validate script
     from common.script_validator import validate_cadquery_script, ScriptValidationError
@@ -127,11 +112,9 @@ def lambda_handler(event: dict, context) -> dict:
     nodes_table = dynamodb.Table(NODES_TABLE)
     nodes_table.update_item(
         Key={"node_id": node_id},
-        UpdateExpression="SET cadquery_script = :script, confidence_map = :conf, ai_questions = :q",
+        UpdateExpression="SET cadquery_script = :script",
         ExpressionAttributeValues={
             ":script": cadquery_script,
-            ":conf": _to_decimal(confidence_map),
-            ":q": _to_decimal(questions),
         },
     )
 
@@ -145,7 +128,6 @@ def lambda_handler(event: dict, context) -> dict:
         "session_id": session_id,
         "node_id": node_id,
         "cadquery_script": cadquery_script,
-        "confidence_map": confidence_map,
     }
 
 
@@ -161,9 +143,25 @@ def _build_image_prompt() -> str:
 ⑤ 点線（破線）は隠れ線（内部形状）、一点鎖線は中心線です
 ⑥ 表題欄の情報（SCALE, DWG NO等）も参照してください
 
+【穴・貫通穴の方向 ― 最重要ルール】
+- 穴の方向は必ず図面のビューから判断すること
+- 正面図で円が見える → その穴は「奥行き方向（Z軸）」に貫通
+- 平面図（上面図）で円が見える → その穴は「高さ方向（Y軸）」に貫通
+- 側面図で円が見える → その穴は「幅方向（X軸）」に貫通
+- CadQuery の `.hole()` はデフォルトで Z 方向に穴を開ける
+  - X方向の穴: `.faces(">X")` or `.faces("<X")` のワークプレーンで `.hole()`
+  - Y方向の穴: `.faces(">Y")` or `.faces("<Y")` のワークプレーンで `.hole()`
+  - Z方向の穴: `.faces(">Z")` or `.faces("<Z")` のワークプレーンで `.hole()`
+- 穴を開ける面を間違えると形状が全く異なるので、必ず図面と照合すること
+
+【CadQuery 座標系】
+- X: 幅（横方向）、Y: 高さ（縦方向）、Z: 奥行き（厚み方向）
+- `cq.Workplane("XY")` で始めた場合、`.box(W, H, D)` は W=X, H=Y, D=Z
+- `.extrude()` は現在のワークプレーンの法線方向に押し出す
+
 【スクリプト作成ルール】
 - `import cadquery as cq` から始まる完全に実行可能なコードを書く
-- 各フィーチャーに `# Feature-NNN: 説明` コメントを付ける
+- 各フィーチャーに `# Feature-NNN: 説明` コメントを付ける（穴には方向も記載: 例 `# Feature-002: Φ30穴 Z方向貫通`）
 - すべての寸法を先頭に定数として定義する（マジックナンバー禁止）
 - 最終結果を `result` 変数に代入する
 - 穴の位置は図面の寸法から正確に計算する
@@ -174,9 +172,7 @@ def _build_image_prompt() -> str:
 JSONのみを出力してください。他の説明文は不要です。
 ```json
 {{
-  "cadquery_script": "import cadquery as cq\\n...",
-  "confidence_map": {{"Feature-001": 0.95, "Feature-002": 0.80}},
-  "questions": []
+  "cadquery_script": "import cadquery as cq\\n..."
 }}
 ```"""
 
@@ -199,9 +195,19 @@ def _build_prompt(parsed_data: dict) -> str:
 【入力ファイル】
 {file_summary}
 
+【穴・貫通穴の方向 ― 最重要ルール】
+- 穴の方向は必ず図面のビューから判断すること
+- 正面図で円が見える → その穴は「奥行き方向（Z軸）」に貫通
+- 平面図（上面図）で円が見える → その穴は「高さ方向（Y軸）」に貫通
+- 側面図で円が見える → その穴は「幅方向（X軸）」に貫通
+- CadQuery の `.hole()` はデフォルトで Z 方向に穴を開ける
+  - X方向の穴: `.faces(">X")` or `.faces("<X")` のワークプレーンで `.hole()`
+  - Y方向の穴: `.faces(">Y")` or `.faces("<Y")` のワークプレーンで `.hole()`
+  - Z方向の穴: `.faces(">Z")` or `.faces("<Z")` のワークプレーンで `.hole()`
+
 【スクリプト作成ルール】
 - `import cadquery as cq` から始まる完全に実行可能なコードを書く
-- 各フィーチャーに `# Feature-NNN:` コメントを付ける
+- 各フィーチャーに `# Feature-NNN:` コメントを付ける（穴には方向も記載）
 - すべての数値は意味のある定数として抽出する（マジックナンバー禁止）
 - 最終結果を `result` 変数に代入する
 - 点線は内部形状として解釈する
@@ -210,17 +216,7 @@ def _build_prompt(parsed_data: dict) -> str:
 
 【出力フォーマット(JSON)】
 {{
-  "cadquery_script": "import cadquery as cq\\n...",
-  "confidence_map": {{"Feature-001": 0.95, "Feature-002": 0.80}},
-  "questions": [
-    {{
-      "id": "Q1",
-      "feature_id": "Feature-002",
-      "text": "質問内容",
-      "confidence": 0.45,
-      "priority": "high"
-    }}
-  ]
+  "cadquery_script": "import cadquery as cq\\n..."
 }}"""
 
 
@@ -247,6 +243,4 @@ def _parse_ai_response(raw: str) -> dict:
 
     return {
         "cadquery_script": script,
-        "confidence_map": {},
-        "questions": [],
     }

@@ -42,7 +42,6 @@ class NodeItem(BaseModel):
     diff_patch: str = ""
     step_s3_key: str = ""
     gltf_s3_key: str = ""
-    confidence_map: dict = Field(default_factory=dict)
     user_message: str = ""
     ai_questions: list[dict] = Field(default_factory=list)
     created_at: int = Field(default_factory=now_ts)

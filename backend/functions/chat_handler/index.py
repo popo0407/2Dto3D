@@ -6,7 +6,6 @@ import logging
 import os
 import time
 import uuid
-from decimal import Decimal
 
 import boto3
 
@@ -62,10 +61,20 @@ def lambda_handler(event: dict, context) -> dict:
 【ユーザーの指示】
 {user_message}
 
+【穴・貫通穴の方向ルール】
+- `.hole()` はデフォルトで現在のワークプレーンの法線方向に穴を開ける
+- X方向の穴: `.faces(">X")` or `.faces("<X")` のワークプレーンで `.hole()`
+- Y方向の穴: `.faces(">Y")` or `.faces("<Y")` のワークプレーンで `.hole()`
+- Z方向の穴: `.faces(">Z")` or `.faces("<Z")` のワークプレーンで `.hole()`
+
+【ルール】
+- 修正後の完全なスクリプトを出力する（差分ではなく全体）
+- show_object() は使用禁止
+- 各フィーチャーに `# Feature-NNN:` コメントを付ける
+
 【出力フォーマット(JSON)】
 {{
   "cadquery_script": "修正後の完全なスクリプト",
-  "confidence_map": {{"Feature-001": 0.95}},
   "diff_summary": "変更箇所の要約"
 }}"""
 
@@ -82,7 +91,6 @@ def lambda_handler(event: dict, context) -> dict:
     # Parse response
     ai_output = _parse_ai_response(raw_response)
     new_script = ai_output.get("cadquery_script", parent_script)
-    confidence_map = _to_decimal(ai_output.get("confidence_map", parent_node.get("confidence_map", {})))
 
     # Validate
     from common.script_validator import validate_cadquery_script, ScriptValidationError
@@ -107,9 +115,7 @@ def lambda_handler(event: dict, context) -> dict:
         "diff_patch": ai_output.get("diff_summary", ""),
         "step_s3_key": "",
         "gltf_s3_key": "",
-        "confidence_map": confidence_map,
         "user_message": user_message,
-        "ai_questions": [],
         "created_at": now,
     }
     nodes_table.put_item(Item=new_node)
@@ -159,18 +165,7 @@ def _parse_ai_response(raw: str) -> dict:
         except json.JSONDecodeError:
             pass
 
-    return {"cadquery_script": "", "confidence_map": {}, "diff_summary": ""}
-
-
-def _to_decimal(obj):
-    """Recursively convert float values to Decimal for DynamoDB compatibility."""
-    if isinstance(obj, float):
-        return Decimal(str(obj))
-    if isinstance(obj, dict):
-        return {k: _to_decimal(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_to_decimal(v) for v in obj]
-    return obj
+    return {"cadquery_script": "", "diff_summary": ""}
 
 
 def _response(status_code: int, body: dict) -> dict:

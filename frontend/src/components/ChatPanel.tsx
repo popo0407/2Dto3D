@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { API_BASE } from "../config";
 
 interface ChatPanelProps {
@@ -9,6 +9,8 @@ interface ChatPanelProps {
   onChatNodeCreated?: (newNodeId: string) => void;
   /** 3Dビューアで選択中の要素情報（AIへのコンテキストとして送信） */
   selectionContext?: string;
+  /** パイプライン再実行が完了したら true になる（親が管理） */
+  pipelineComplete?: boolean;
 }
 
 interface ChatMessage {
@@ -16,10 +18,28 @@ interface ChatMessage {
   content: string;
 }
 
-export function ChatPanel({ sessionId, nodeId, idToken, onChatNodeCreated, selectionContext }: ChatPanelProps) {
+export function ChatPanel({ sessionId, nodeId, idToken, onChatNodeCreated, selectionContext, pipelineComplete }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [waitingPipeline, setWaitingPipeline] = useState(false);
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  // パイプライン完了時にチャットへ完了メッセージを追加
+  useEffect(() => {
+    if (waitingPipeline && pipelineComplete) {
+      setWaitingPipeline(false);
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: "✅ 3Dモデルの再生成が完了しました。ビューアに反映済みです。" },
+      ]);
+    }
+  }, [pipelineComplete, waitingPipeline]);
+
+  // 新着メッセージ時に最下部へスクロール
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
 
   const handleSend = async () => {
     if (!input.trim() || !sessionId || !nodeId) return;
@@ -56,6 +76,7 @@ export function ChatPanel({ sessionId, nodeId, idToken, onChatNodeCreated, selec
 
       // 新 node_id をパイプライン再実行のために親へ通知
       if (data.node_id && onChatNodeCreated) {
+        setWaitingPipeline(true);
         onChatNodeCreated(data.node_id);
       }
     } catch {
@@ -108,6 +129,12 @@ export function ChatPanel({ sessionId, nodeId, idToken, onChatNodeCreated, selec
             考え中...
           </div>
         )}
+        {waitingPipeline && !loading && (
+          <div className="mr-6 rounded-lg bg-blue-50 border border-blue-200 px-3 py-2 text-sm text-blue-600 animate-pulse">
+            ⚙️ 3Dモデルを再構築中...
+          </div>
+        )}
+        <div ref={bottomRef} />
       </div>
       <div className="flex gap-2 border-t p-3">
         <label htmlFor="chat-input" className="sr-only">
