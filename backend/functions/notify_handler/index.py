@@ -83,6 +83,7 @@ def lambda_handler(event: dict, context) -> dict:
         "session_id": session_id,
         "node_id": node_id,
         "gltf_url": gltf_url,
+        "ai_reasoning": node.get("ai_reasoning", ""),
         "status": final_status,
         "validation": validation,
     })

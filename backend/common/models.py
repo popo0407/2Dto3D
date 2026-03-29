@@ -39,6 +39,7 @@ class NodeItem(BaseModel):
     parent_node_id: str = ""
     type: str = "INITIAL"
     cadquery_script: str = ""
+    ai_reasoning: str = ""
     diff_patch: str = ""
     step_s3_key: str = ""
     gltf_s3_key: str = ""

@@ -35,15 +35,14 @@ function SelectableModel({
   onMeshSelect: (info: SelectionInfo | null, mesh: THREE.Object3D | null) => void;
 }) {
   const { scene } = useGLTF(url);
-  const [selectedId, setSelectedId] = useState<number | null>(null);
-  const materialsMap = useRef(new Map<number, THREE.Material | THREE.Material[]>());
+  const highlightRef = useRef<THREE.Mesh | null>(null);
+  const edgeRef = useRef<THREE.LineSegments | null>(null);
 
   const clonedScene = useMemo(() => {
     const clone = scene.clone(true);
     clone.traverse((child) => {
       if ((child as THREE.Mesh).isMesh) {
         const mesh = child as THREE.Mesh;
-        // Compute normals if missing (trimesh GLB often lacks them)
         if (mesh.geometry && !mesh.geometry.attributes.normal) {
           mesh.geometry.computeVertexNormals();
         }
@@ -57,52 +56,58 @@ function SelectableModel({
     return clone;
   }, [scene]);
 
-  const restoreSelection = useCallback(() => {
-    if (selectedId != null) {
-      const prev = clonedScene.getObjectById(selectedId) as THREE.Mesh | undefined;
-      const saved = materialsMap.current.get(selectedId);
-      if (prev && saved) {
-        prev.material = saved as THREE.Material;
-      }
-      materialsMap.current.delete(selectedId);
+  const clearHighlight = useCallback(() => {
+    if (highlightRef.current) {
+      highlightRef.current.parent?.remove(highlightRef.current);
+      highlightRef.current.geometry.dispose();
+      (highlightRef.current.material as THREE.Material).dispose();
+      highlightRef.current = null;
     }
-  }, [selectedId, clonedScene]);
+    if (edgeRef.current) {
+      edgeRef.current.parent?.remove(edgeRef.current);
+      edgeRef.current.geometry.dispose();
+      (edgeRef.current.material as THREE.Material).dispose();
+      edgeRef.current = null;
+    }
+  }, []);
 
   const handleClick = useCallback(
     (e: ThreeEvent<MouseEvent>) => {
       e.stopPropagation();
       const mesh = e.object as THREE.Mesh;
-      if (!mesh.isMesh) return;
+      if (!mesh.isMesh || e.faceIndex == null || !e.face) return;
 
-      restoreSelection();
+      clearHighlight();
 
-      // Toggle off if clicking same mesh
-      if (mesh.id === selectedId) {
-        setSelectedId(null);
-        onMeshSelect(null, null);
-        return;
-      }
+      // Build coplanar face overlay
+      const hlGeo = _buildCoplanarHighlight(mesh.geometry, e.faceIndex, e.face.normal);
+      const hlMat = new THREE.MeshBasicMaterial({
+        color: 0xff6600,
+        transparent: true,
+        opacity: 0.45,
+        side: THREE.DoubleSide,
+        depthTest: true,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+      });
+      const hlMesh = new THREE.Mesh(hlGeo, hlMat);
+      mesh.add(hlMesh);
+      highlightRef.current = hlMesh;
 
-      // Save original & apply highlight
-      materialsMap.current.set(mesh.id, mesh.material);
-      const hlMat = (mesh.material as THREE.Material).clone();
-      if ("color" in hlMat) (hlMat as THREE.MeshStandardMaterial).color.set(0xff6600);
-      if ("emissive" in hlMat) (hlMat as THREE.MeshStandardMaterial).emissive.set(0x331100);
-      hlMat.transparent = true;
-      hlMat.opacity = 0.85;
-      mesh.material = hlMat;
-      setSelectedId(mesh.id);
+      // Add edge outline for the selected faces
+      const edgeGeo = new THREE.EdgesGeometry(hlGeo, 1);
+      const edgeMat = new THREE.LineBasicMaterial({ color: 0xffaa00, linewidth: 2 });
+      const edgeLine = new THREE.LineSegments(edgeGeo, edgeMat);
+      mesh.add(edgeLine);
+      edgeRef.current = edgeLine;
 
       const box = new THREE.Box3().setFromObject(mesh);
       const sz = box.getSize(new THREE.Vector3());
 
-      // Extract face normal from the intersection
       let faceNormal: { x: number; y: number; z: number } | undefined;
-      if (e.face) {
-        const n = e.face.normal.clone();
-        n.transformDirection(mesh.matrixWorld);
-        faceNormal = { x: +n.x.toFixed(4), y: +n.y.toFixed(4), z: +n.z.toFixed(4) };
-      }
+      const n = e.face.normal.clone();
+      n.transformDirection(mesh.matrixWorld);
+      faceNormal = { x: +n.x.toFixed(4), y: +n.y.toFixed(4), z: +n.z.toFixed(4) };
 
       onMeshSelect(
         {
@@ -125,14 +130,13 @@ function SelectableModel({
         mesh,
       );
     },
-    [selectedId, restoreSelection, onMeshSelect],
+    [clearHighlight, onMeshSelect],
   );
 
   const handleMiss = useCallback(() => {
-    restoreSelection();
-    setSelectedId(null);
+    clearHighlight();
     onMeshSelect(null, null);
-  }, [restoreSelection, onMeshSelect]);
+  }, [clearHighlight, onMeshSelect]);
 
   // Auto-fit camera to model bounds on first load
   const bounds = useBounds();
@@ -311,7 +315,68 @@ function _normalToLabel(n: { x: number; y: number; z: number }): string {
   if (abs.y >= abs.x && abs.y >= abs.z) return n.y > 0 ? "+Y面 (上)" : "-Y面 (下)";
   return n.z > 0 ? "+Z面 (前)" : "-Z面 (奥)";
 }
+/**
+ * Build a BufferGeometry containing only the coplanar faces of the clicked triangle.
+ * Coplanar = same normal direction AND same plane (within tolerances).
+ */
+function _buildCoplanarHighlight(
+  geometry: THREE.BufferGeometry,
+  faceIndex: number,
+  faceNormal: THREE.Vector3,
+): THREE.BufferGeometry {
+  const pos = geometry.attributes.position as THREE.BufferAttribute;
+  const idx = geometry.index;
+  const totalFaces = idx ? idx.count / 3 : pos.count / 3;
+  const normal = faceNormal.clone().normalize();
 
+  // Reference vertex of the clicked face for plane constant
+  const refI = idx ? idx.getX(faceIndex * 3) : faceIndex * 3;
+  const refV = new THREE.Vector3(pos.getX(refI), pos.getY(refI), pos.getZ(refI));
+  const d0 = normal.dot(refV);
+
+  const selected: number[] = [];
+  const e1 = new THREE.Vector3();
+  const e2 = new THREE.Vector3();
+  const fn = new THREE.Vector3();
+  const fv0 = new THREE.Vector3();
+
+  for (let f = 0; f < totalFaces; f++) {
+    const i0 = idx ? idx.getX(f * 3) : f * 3;
+    const i1 = idx ? idx.getX(f * 3 + 1) : f * 3 + 1;
+    const i2 = idx ? idx.getX(f * 3 + 2) : f * 3 + 2;
+
+    fv0.set(pos.getX(i0), pos.getY(i0), pos.getZ(i0));
+    e1.set(pos.getX(i1) - fv0.x, pos.getY(i1) - fv0.y, pos.getZ(i1) - fv0.z);
+    e2.set(pos.getX(i2) - fv0.x, pos.getY(i2) - fv0.y, pos.getZ(i2) - fv0.z);
+    fn.crossVectors(e1, e2).normalize();
+
+    // Same normal direction (dot > 0.99) AND same plane (d within tolerance)
+    if (Math.abs(fn.dot(normal)) > 0.99) {
+      const d = normal.dot(fv0);
+      if (Math.abs(d - d0) < 0.5) {
+        selected.push(f);
+      }
+    }
+  }
+
+  // Build geometry with slight offset to avoid z-fighting
+  const offset = 0.02;
+  const positions = new Float32Array(selected.length * 9);
+  for (let s = 0; s < selected.length; s++) {
+    const f = selected[s]!;
+    for (let v = 0; v < 3; v++) {
+      const vi = idx ? idx.getX(f * 3 + v) : f * 3 + v;
+      positions[s * 9 + v * 3] = pos.getX(vi) + normal.x * offset;
+      positions[s * 9 + v * 3 + 1] = pos.getY(vi) + normal.y * offset;
+      positions[s * 9 + v * 3 + 2] = pos.getZ(vi) + normal.z * offset;
+    }
+  }
+
+  const hlGeo = new THREE.BufferGeometry();
+  hlGeo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  hlGeo.computeVertexNormals();
+  return hlGeo;
+}
 /* ---------- Selection Info Panel ---------- */
 
 function SelectionPanel({ selection }: { selection: SelectionInfo | null }) {

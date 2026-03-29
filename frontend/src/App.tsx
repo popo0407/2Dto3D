@@ -15,6 +15,7 @@ interface WsNotifyMessage {
   session_id?: string;
   node_id?: string;
   gltf_url?: string;
+  ai_reasoning?: string;
   error?: string;
   step?: string;
   progress?: number;
@@ -39,6 +40,7 @@ export default function App() {
   const [processingStep, setProcessingStep] = useState<string>("");
   const [processingProgress, setProcessingProgress] = useState<number>(0);
   const [aiQuestions, setAiQuestions] = useState<AiQuestion[]>([]);
+  const [aiReasoning, setAiReasoning] = useState<string>("");
   const [selection, setSelection] = useState<SelectionInfo | null>(null);
   const [chatPipelineComplete, setChatPipelineComplete] = useState(false);
 
@@ -48,7 +50,7 @@ export default function App() {
   // UploadPanel から呼ばれる。WebSocket を接続して接続確立後に resolve する Promise を返す。
   // 呼び出し元は await してから /process を呼ぶことで競合状態を防ぐ。
   const handleProcessingStart = useCallback(
-    (sid: string, onComplete: (nodeId: string, url: string) => void, onError: (msg: string) => void): Promise<void> => {
+    (sid: string, onComplete: (nodeId: string, url: string, reasoning?: string) => void, onError: (msg: string) => void): Promise<void> => {
       return new Promise((resolve, reject) => {
         // 既存 WS があれば閉じる
         wsRef.current?.close();
@@ -73,7 +75,7 @@ export default function App() {
           } else if (msg.type === "PROCESSING_COMPLETE" && msg.node_id && msg.gltf_url) {
               setProcessingProgress(100);
               ws.close();
-              onComplete(msg.node_id, msg.gltf_url);
+              onComplete(msg.node_id, msg.gltf_url, msg.ai_reasoning);
             } else if (msg.type === "PROCESSING_FAILED") {
               ws.close();
               onError(msg.error ?? "処理に失敗しました");
@@ -101,12 +103,13 @@ export default function App() {
       setView("viewer");
       handleProcessingStart(
         sid,
-        (completedNodeId, url) => {
+        (completedNodeId, url, reasoning) => {
           setNodeId(completedNodeId);
           setGltfUrl(url);
           setProcessingStep("");
           setProcessingProgress(0);
           setChatPipelineComplete(true);
+          if (reasoning) setAiReasoning(reasoning);
           // 次回チャット変更に備えて少し遅延してリセット
           setTimeout(() => setChatPipelineComplete(false), 500);
         },
@@ -135,6 +138,7 @@ export default function App() {
     setProcessingStep("");
     setProcessingProgress(0);
     setAiQuestions([]);
+    setAiReasoning("");
     setView("upload");
   };
 
@@ -146,10 +150,11 @@ export default function App() {
     setSessionId(id);
   };
 
-  const handleProcessingComplete = (nid: string, url: string) => {
+  const handleProcessingComplete = (nid: string, url: string, reasoning?: string) => {
     setNodeId(nid);
     setGltfUrl(url);
     setView("viewer");
+    if (reasoning) setAiReasoning(reasoning);
   };
 
   const handleDownloadStep = async (sid: string, nid: string, token: string) => {
@@ -232,6 +237,16 @@ export default function App() {
               />
             </section>
             <aside className="flex w-80 flex-col border-l bg-white" aria-label="サイドパネル">
+              {aiReasoning && (
+                <details className="border-b" open>
+                  <summary className="cursor-pointer bg-indigo-50 px-4 py-2 text-xs font-semibold text-indigo-700 hover:bg-indigo-100">
+                    🧠 AIの解析理由
+                  </summary>
+                  <div className="max-h-60 overflow-y-auto px-4 py-3 text-xs text-gray-700 whitespace-pre-wrap leading-relaxed">
+                    {aiReasoning}
+                  </div>
+                </details>
+              )}
               {aiQuestions.length > 0 && (
                 <div
                   className="border-b bg-amber-50 px-4 py-3"

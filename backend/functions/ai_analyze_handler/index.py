@@ -98,6 +98,7 @@ def lambda_handler(event: dict, context) -> dict:
     # Parse AI response
     ai_output = _parse_ai_response(raw_response)
     cadquery_script = ai_output.get("cadquery_script", "")
+    ai_reasoning = ai_output.get("reasoning", "")
 
     # Validate script
     from common.script_validator import validate_cadquery_script, ScriptValidationError
@@ -112,9 +113,10 @@ def lambda_handler(event: dict, context) -> dict:
     nodes_table = dynamodb.Table(NODES_TABLE)
     nodes_table.update_item(
         Key={"node_id": node_id},
-        UpdateExpression="SET cadquery_script = :script",
+        UpdateExpression="SET cadquery_script = :script, ai_reasoning = :reason",
         ExpressionAttributeValues={
             ":script": cadquery_script,
+            ":reason": ai_reasoning,
         },
     )
 
@@ -128,6 +130,7 @@ def lambda_handler(event: dict, context) -> dict:
         "session_id": session_id,
         "node_id": node_id,
         "cadquery_script": cadquery_script,
+        "ai_reasoning": ai_reasoning,
     }
 
 
@@ -168,10 +171,19 @@ def _build_image_prompt() -> str:
 - show_object() は使用禁止（ヘッドレス実行環境のため）
 - `import math` は使用可能
 
+【reasoning フィールド ― 必須】
+以下の内容を日本語で stepごとに記述してください:
+1. 図面から識別したビュー（正面図・平面図・側面図）とその寸法
+2. 識別した各フィーチャー（穴・溝・段差等）とその判断根拠
+3. 穴の方向判断理由（どのビューの円からどの軸方向と判断したか）
+4. 寸法の解釈（基準点と相対位置）
+5. 最終的な3D形状の概要
+
 【出力フォーマット】
 JSONのみを出力してください。他の説明文は不要です。
 ```json
 {{
+  "reasoning": "## 図面解析\n\n### 識別ビュー\n- ...",
   "cadquery_script": "import cadquery as cq\\n..."
 }}
 ```"""
@@ -214,8 +226,17 @@ def _build_prompt(parsed_data: dict) -> str:
 - show_object() は使用禁止（ヘッドレス実行環境のため）
 - `import math` は使用可能
 
+【reasoning フィールド ― 必須】
+以下の内容を日本語で stepごとに記述してください:
+1. 図面から識別したビュー（正面図・平面図・側面図）とその寸法
+2. 識別した各フィーチャー（穴・溝・段差等）とその判断根拠
+3. 穴の方向判断理由（どのビューの円からどの軸方向と判断したか）
+4. 寸法の解釈（基準点と相対位置）
+5. 最終的な3D形状の概要
+
 【出力フォーマット(JSON)】
 {{
+  "reasoning": "## 図面解析\n\n### 識別ビュー\n- ...",
   "cadquery_script": "import cadquery as cq\\n..."
 }}"""
 
