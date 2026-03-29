@@ -60,6 +60,14 @@ class NetworkStack(Stack):
             auto_delete_objects=env_name == "dev",
             encryption=s3.BucketEncryption.S3_MANAGED,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            cors=[
+                s3.CorsRule(
+                    allowed_methods=[s3.HttpMethods.GET],
+                    allowed_origins=["*"],
+                    allowed_headers=["*"],
+                    max_age=3600,
+                )
+            ],
         )
 
         # ---------- Frontend Bucket + CloudFront ----------
