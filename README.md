@@ -189,3 +189,5 @@ PYTHONPATH=. pytest tests/ -v
 | 2026-03 | WebSocket `$default` ルート欠如 → `ws_default_fn` Lambda + CDK ルート登録 |
 | 2026-03 | `notify_fn` に `WEBSOCKET_API_ID` 未渡し → `pipeline_stack` の `extra_env` に追加 |
 | 2026-03 | `Viewer3D.tsx` が glTF を描画しない → `useGLTF` による実 glTF ロード実装 |
+| 2026-03 | glTF 読み込み「Failed to fetch」CORS エラー → previews_bucket に CORS (GET) 設定追加 |
+| 2026-03 | `Stage environment="city"` による外部 HDR 301 リダイレクト → シンプルなライティング（ambientLight + directionalLight）に置換 |

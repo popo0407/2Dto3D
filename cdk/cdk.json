@@ -1,6 +1,7 @@
 {
   "app": "python app.py",
   "context": {
+    "account": "590184009554",
     "environment": "dev",
     "enableFargate": true,
     "bedrockRegion": "ap-northeast-1"
