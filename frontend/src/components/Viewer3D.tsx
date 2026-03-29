@@ -5,7 +5,7 @@ import * as THREE from "three";
 
 /* ---------- Shared types ---------- */
 
-export type SelectionType = "face" | "edge" | "mesh";
+export type SelectionType = "face" | "edge" | "cylinder" | "mesh";
 
 export interface SelectionInfo {
   type: SelectionType;
@@ -15,6 +15,14 @@ export interface SelectionInfo {
   normal?: { x: number; y: number; z: number };
   dimensions: { width: number; height: number; depth: number };
   faceIndex?: number;
+  faceDimensions?: { width: number; height: number; area: number };
+  cylinderInfo?: { diameter: number; depth: number; axis: string };
+}
+
+export interface MeasureResult {
+  point1: { x: number; y: number; z: number };
+  point2: { x: number; y: number; z: number };
+  distance: number;
 }
 
 interface Viewer3DProps {
@@ -30,9 +38,13 @@ type DimensionMode = "off" | "selected" | "all";
 function SelectableModel({
   url,
   onMeshSelect,
+  measureMode,
+  onMeasureClick,
 }: {
   url: string;
   onMeshSelect: (info: SelectionInfo | null, mesh: THREE.Object3D | null) => void;
+  measureMode: boolean;
+  onMeasureClick?: (point: THREE.Vector3, normal: THREE.Vector3) => void;
 }) {
   const { scene } = useGLTF(url);
   const highlightRef = useRef<THREE.Mesh | null>(null);
@@ -77,12 +89,37 @@ function SelectableModel({
       const mesh = e.object as THREE.Mesh;
       if (!mesh.isMesh || e.faceIndex == null || !e.face) return;
 
+      // Distance measurement mode
+      if (measureMode && onMeasureClick) {
+        const n = e.face.normal.clone();
+        n.transformDirection(mesh.matrixWorld);
+        onMeasureClick(e.point.clone(), n.normalize());
+        return;
+      }
+
       clearHighlight();
 
-      // Build coplanar face overlay
-      const hlGeo = _buildCoplanarHighlight(mesh.geometry, e.faceIndex, e.face.normal);
+      // Try cylinder detection (holes / curved surfaces)
+      const cylResult = _detectCylinder(mesh.geometry, e.faceIndex);
+
+      let hlGeo: THREE.BufferGeometry;
+      let selType: SelectionType = "face";
+      let faceDims: { width: number; height: number; area: number } | undefined;
+      let cylInfo: { diameter: number; depth: number; axis: string } | undefined;
+      let hlColor = 0xff6600;
+
+      if (cylResult) {
+        hlGeo = cylResult.highlightGeo;
+        selType = "cylinder";
+        cylInfo = { diameter: cylResult.diameter, depth: cylResult.depth, axis: cylResult.axis };
+        hlColor = 0x00ccff;
+      } else {
+        hlGeo = _buildCoplanarHighlight(mesh.geometry, e.faceIndex, e.face.normal);
+        faceDims = _computeFaceGroupInfo(hlGeo, e.face.normal);
+      }
+
       const hlMat = new THREE.MeshBasicMaterial({
-        color: 0xff6600,
+        color: hlColor,
         transparent: true,
         opacity: 0.45,
         side: THREE.DoubleSide,
@@ -96,7 +133,7 @@ function SelectableModel({
 
       // Add edge outline for the selected faces
       const edgeGeo = new THREE.EdgesGeometry(hlGeo, 1);
-      const edgeMat = new THREE.LineBasicMaterial({ color: 0xffaa00, linewidth: 2 });
+      const edgeMat = new THREE.LineBasicMaterial({ color: cylResult ? 0x00aaff : 0xffaa00, linewidth: 2 });
       const edgeLine = new THREE.LineSegments(edgeGeo, edgeMat);
       mesh.add(edgeLine);
       edgeRef.current = edgeLine;
@@ -111,7 +148,7 @@ function SelectableModel({
 
       onMeshSelect(
         {
-          type: "face",
+          type: selType,
           meshName: mesh.name || `mesh_${mesh.id}`,
           featureId: _extractFeatureId(mesh.name),
           position: {
@@ -126,11 +163,13 @@ function SelectableModel({
             depth: +sz.z.toFixed(2),
           },
           faceIndex: e.faceIndex ?? undefined,
+          faceDimensions: faceDims,
+          cylinderInfo: cylInfo,
         },
         mesh,
       );
     },
-    [clearHighlight, onMeshSelect],
+    [clearHighlight, onMeshSelect, measureMode, onMeasureClick],
   );
 
   const handleMiss = useCallback(() => {
@@ -238,14 +277,24 @@ function DimensionLines({ target }: { target: THREE.Object3D }) {
 function SceneContent({
   gltfUrl,
   dimensionMode,
+  measureMode,
   onSelectionChange,
+  onMeasureResult,
 }: {
   gltfUrl: string;
   dimensionMode: DimensionMode;
+  measureMode: boolean;
   onSelectionChange: (info: SelectionInfo | null) => void;
+  onMeasureResult: (result: MeasureResult | null) => void;
 }) {
   const [selectedMesh, setSelectedMesh] = useState<THREE.Object3D | null>(null);
   const sceneRootRef = useRef<THREE.Group>(null);
+  const measureRef = useRef<{ point: THREE.Vector3; normal: THREE.Vector3 } | null>(null);
+  const [measureLine, setMeasureLine] = useState<{
+    p1: [number, number, number];
+    p2: [number, number, number];
+    distance: number;
+  } | null>(null);
 
   const handleMeshSelect = useCallback(
     (info: SelectionInfo | null, mesh: THREE.Object3D | null) => {
@@ -254,6 +303,49 @@ function SceneContent({
     },
     [onSelectionChange],
   );
+
+  const handleMeasureClick = useCallback(
+    (point: THREE.Vector3, normal: THREE.Vector3) => {
+      if (!measureRef.current) {
+        // First point
+        measureRef.current = { point, normal };
+        setMeasureLine(null);
+        onMeasureResult(null);
+      } else {
+        // Second point — compute distance
+        const first = measureRef.current;
+        const dot = first.normal.dot(normal);
+        let distance: number;
+        if (Math.abs(dot) > 0.9) {
+          // Parallel faces → perpendicular distance between planes
+          const diff = first.point.clone().sub(point);
+          distance = Math.abs(first.normal.dot(diff));
+        } else {
+          // Non-parallel → point-to-point distance
+          distance = first.point.distanceTo(point);
+        }
+        const p1: [number, number, number] = [first.point.x, first.point.y, first.point.z];
+        const p2: [number, number, number] = [point.x, point.y, point.z];
+        setMeasureLine({ p1, p2, distance });
+        onMeasureResult({
+          point1: { x: +p1[0].toFixed(2), y: +p1[1].toFixed(2), z: +p1[2].toFixed(2) },
+          point2: { x: +p2[0].toFixed(2), y: +p2[1].toFixed(2), z: +p2[2].toFixed(2) },
+          distance: +distance.toFixed(2),
+        });
+        measureRef.current = null;
+      }
+    },
+    [onMeasureResult],
+  );
+
+  // Clear measure state when leaving measure mode
+  useEffect(() => {
+    if (!measureMode) {
+      measureRef.current = null;
+      setMeasureLine(null);
+      onMeasureResult(null);
+    }
+  }, [measureMode, onMeasureResult]);
 
   const dimensionTarget =
     dimensionMode === "all"
@@ -270,11 +362,19 @@ function SceneContent({
       <Bounds fit clip observe margin={1.5}>
         <Center>
           <group ref={sceneRootRef}>
-            <SelectableModel url={gltfUrl} onMeshSelect={handleMeshSelect} />
+            <SelectableModel
+              url={gltfUrl}
+              onMeshSelect={handleMeshSelect}
+              measureMode={measureMode}
+              onMeasureClick={handleMeasureClick}
+            />
           </group>
         </Center>
       </Bounds>
       {dimensionTarget && <DimensionLines target={dimensionTarget} />}
+      {measureLine && (
+        <MeasureDistanceLine p1={measureLine.p1} p2={measureLine.p2} distance={measureLine.distance} />
+      )}
       <OrbitControls makeDefault />
       <Grid
         args={[20, 20]}
@@ -377,27 +477,220 @@ function _buildCoplanarHighlight(
   hlGeo.computeVertexNormals();
   return hlGeo;
 }
+/**
+ * Compute bounding dimensions and area of a highlighted face group.
+ */
+function _computeFaceGroupInfo(
+  hlGeo: THREE.BufferGeometry,
+  faceNormal: THREE.Vector3,
+): { width: number; height: number; area: number } {
+  const pos = hlGeo.attributes.position as THREE.BufferAttribute;
+  const count = pos.count;
+  if (count === 0) return { width: 0, height: 0, area: 0 };
+
+  const n = faceNormal.clone().normalize();
+  const up = Math.abs(n.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+  const u = new THREE.Vector3().crossVectors(n, up).normalize();
+  const v = new THREE.Vector3().crossVectors(n, u).normalize();
+
+  let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+  const p = new THREE.Vector3();
+  for (let i = 0; i < count; i++) {
+    p.set(pos.getX(i), pos.getY(i), pos.getZ(i));
+    const pu = p.dot(u), pv = p.dot(v);
+    if (pu < minU) minU = pu;
+    if (pu > maxU) maxU = pu;
+    if (pv < minV) minV = pv;
+    if (pv > maxV) maxV = pv;
+  }
+
+  let area = 0;
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+  const ab = new THREE.Vector3(), ac = new THREE.Vector3();
+  for (let i = 0; i < count; i += 3) {
+    a.set(pos.getX(i), pos.getY(i), pos.getZ(i));
+    b.set(pos.getX(i + 1), pos.getY(i + 1), pos.getZ(i + 1));
+    c.set(pos.getX(i + 2), pos.getY(i + 2), pos.getZ(i + 2));
+    ab.subVectors(b, a);
+    ac.subVectors(c, a);
+    area += ab.cross(ac).length() / 2;
+  }
+
+  return {
+    width: +(maxU - minU).toFixed(2),
+    height: +(maxV - minV).toFixed(2),
+    area: +area.toFixed(2),
+  };
+}
+
+/**
+ * Detect cylindrical surface (holes/bosses) by flood-filling from a non-planar face.
+ */
+function _detectCylinder(
+  geometry: THREE.BufferGeometry,
+  startFaceIndex: number,
+): { diameter: number; depth: number; axis: string; center: THREE.Vector3; highlightGeo: THREE.BufferGeometry } | null {
+  const pos = geometry.attributes.position as THREE.BufferAttribute;
+  const idx = geometry.index;
+  const totalFaces = idx ? idx.count / 3 : pos.count / 3;
+  const getVI = (f: number, v: number) => idx ? idx.getX(f * 3 + v) : f * 3 + v;
+
+  const _e1 = new THREE.Vector3(), _e2 = new THREE.Vector3();
+  const faceNormalOf = (f: number): THREE.Vector3 => {
+    const i0 = getVI(f, 0), i1 = getVI(f, 1), i2 = getVI(f, 2);
+    _e1.set(pos.getX(i1) - pos.getX(i0), pos.getY(i1) - pos.getY(i0), pos.getZ(i1) - pos.getZ(i0));
+    _e2.set(pos.getX(i2) - pos.getX(i0), pos.getY(i2) - pos.getY(i0), pos.getZ(i2) - pos.getZ(i0));
+    return new THREE.Vector3().crossVectors(_e1, _e2).normalize();
+  };
+
+  // Only detect cylinders for non-axis-aligned faces
+  const sn = faceNormalOf(startFaceIndex);
+  if (Math.abs(sn.x) > 0.85 || Math.abs(sn.y) > 0.85 || Math.abs(sn.z) > 0.85) return null;
+
+  // Build adjacency via position-based edge keys
+  const R = 10000;
+  const posKey = (vi: number) =>
+    `${Math.round(pos.getX(vi) * R)}_${Math.round(pos.getY(vi) * R)}_${Math.round(pos.getZ(vi) * R)}`;
+  const edgeKey = (vi1: number, vi2: number) => {
+    const k1 = posKey(vi1), k2 = posKey(vi2);
+    return k1 < k2 ? k1 + "|" + k2 : k2 + "|" + k1;
+  };
+
+  const edgeToFaces = new Map<string, number[]>();
+  for (let f = 0; f < totalFaces; f++) {
+    const i0 = getVI(f, 0), i1 = getVI(f, 1), i2 = getVI(f, 2);
+    for (const [a, b] of [[i0, i1], [i1, i2], [i2, i0]] as [number, number][]) {
+      const key = edgeKey(a, b);
+      const arr = edgeToFaces.get(key);
+      if (arr) arr.push(f);
+      else edgeToFaces.set(key, [f]);
+    }
+  }
+
+  const adj = new Map<number, Set<number>>();
+  for (const faces of edgeToFaces.values()) {
+    for (let i = 0; i < faces.length; i++)
+      for (let j = i + 1; j < faces.length; j++) {
+        if (!adj.has(faces[i]!)) adj.set(faces[i]!, new Set());
+        if (!adj.has(faces[j]!)) adj.set(faces[j]!, new Set());
+        adj.get(faces[i]!)!.add(faces[j]!);
+        adj.get(faces[j]!)!.add(faces[i]!);
+      }
+  }
+
+  // Flood fill connected curved faces
+  const visited = new Set<number>([startFaceIndex]);
+  const queue = [startFaceIndex];
+  while (queue.length > 0 && visited.size < 800) {
+    const f = queue.shift()!;
+    const nb = adj.get(f);
+    if (!nb) continue;
+    for (const nf of nb) {
+      if (visited.has(nf)) continue;
+      const nn = faceNormalOf(nf);
+      if (Math.abs(nn.x) > 0.85 || Math.abs(nn.y) > 0.85 || Math.abs(nn.z) > 0.85) continue;
+      visited.add(nf);
+      queue.push(nf);
+    }
+  }
+
+  if (visited.size < 4) return null;
+
+  // Determine cylinder axis from normal distribution
+  const nSum = new THREE.Vector3();
+  for (const f of visited) {
+    const fn = faceNormalOf(f);
+    nSum.x += Math.abs(fn.x);
+    nSum.y += Math.abs(fn.y);
+    nSum.z += Math.abs(fn.z);
+  }
+  nSum.divideScalar(visited.size);
+
+  let axisLabel: string, axisIdx: number;
+  if (nSum.x <= nSum.y && nSum.x <= nSum.z) { axisLabel = "X"; axisIdx = 0; }
+  else if (nSum.y <= nSum.x && nSum.y <= nSum.z) { axisLabel = "Y"; axisIdx = 1; }
+  else { axisLabel = "Z"; axisIdx = 2; }
+
+  const bbox = new THREE.Box3();
+  for (const f of visited) {
+    for (let v = 0; v < 3; v++) {
+      const vi = getVI(f, v);
+      bbox.expandByPoint(new THREE.Vector3(pos.getX(vi), pos.getY(vi), pos.getZ(vi)));
+    }
+  }
+  const size = bbox.getSize(new THREE.Vector3());
+  const center = bbox.getCenter(new THREE.Vector3());
+  const sArr = [size.x, size.y, size.z];
+  const depth = sArr[axisIdx]!;
+  const perp = sArr.filter((_, i) => i !== axisIdx);
+  const diameter = Math.max(...perp);
+
+  // Build highlight geometry (offset each face along its own normal)
+  const positions = new Float32Array(visited.size * 9);
+  let pIdx = 0;
+  for (const f of visited) {
+    const fn = faceNormalOf(f);
+    const nx = fn.x * 0.03, ny = fn.y * 0.03, nz = fn.z * 0.03;
+    for (let v = 0; v < 3; v++) {
+      const vi = getVI(f, v);
+      positions[pIdx++] = pos.getX(vi) + nx;
+      positions[pIdx++] = pos.getY(vi) + ny;
+      positions[pIdx++] = pos.getZ(vi) + nz;
+    }
+  }
+  const hlGeo = new THREE.BufferGeometry();
+  hlGeo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  hlGeo.computeVertexNormals();
+
+  return { diameter: +diameter.toFixed(2), depth: +depth.toFixed(2), axis: axisLabel, center, highlightGeo: hlGeo };
+}
+
 /* ---------- Selection Info Panel ---------- */
 
-function SelectionPanel({ selection }: { selection: SelectionInfo | null }) {
-  if (!selection) return null;
+function SelectionPanel({ selection, measureResult }: { selection: SelectionInfo | null; measureResult: MeasureResult | null }) {
+  if (!selection && !measureResult) return null;
   return (
-    <div className="absolute top-4 left-4 rounded bg-gray-900/80 p-3 text-xs text-gray-200 max-w-56">
-      <p className="font-semibold text-orange-400 mb-1">選択中: {selection.meshName}</p>
-      {selection.featureId && (
-        <p className="text-cyan-400">Feature: {selection.featureId}</p>
+    <div className="absolute top-4 left-4 rounded bg-gray-900/80 p-3 text-xs text-gray-200 max-w-64 space-y-1">
+      {selection && (
+        <>
+          <p className="font-semibold text-orange-400 mb-1">
+            {selection.type === "cylinder" ? "🕳️ 穴/円柱面" : "📐 面"}: {selection.meshName}
+          </p>
+          {selection.featureId && (
+            <p className="text-cyan-400">Feature: {selection.featureId}</p>
+          )}
+          {selection.cylinderInfo && (
+            <div className="border-l-2 border-cyan-500 pl-2 my-1">
+              <p className="text-cyan-300 font-semibold">穴の情報</p>
+              <p>直径: Φ{selection.cylinderInfo.diameter} mm</p>
+              <p>深さ: {selection.cylinderInfo.depth} mm</p>
+              <p>軸方向: {selection.cylinderInfo.axis}軸</p>
+            </div>
+          )}
+          {selection.faceDimensions && (
+            <div className="border-l-2 border-orange-500 pl-2 my-1">
+              <p className="text-orange-300 font-semibold">面の寸法</p>
+              <p>{selection.faceDimensions.width} × {selection.faceDimensions.height} mm</p>
+              <p>面積: {selection.faceDimensions.area} mm²</p>
+            </div>
+          )}
+          <p>
+            位置: ({selection.position.x}, {selection.position.y}, {selection.position.z})
+          </p>
+          <p className="text-gray-400">
+            全体: W{selection.dimensions.width} × H{selection.dimensions.height} × D{selection.dimensions.depth}
+          </p>
+          {selection.normal && (
+            <p className="text-cyan-300">面方向: {_normalToLabel(selection.normal)}</p>
+          )}
+        </>
       )}
-      <p>
-        位置: ({selection.position.x}, {selection.position.y}, {selection.position.z})
-      </p>
-      <p>
-        寸法: W{selection.dimensions.width} × H{selection.dimensions.height} × D
-        {selection.dimensions.depth}
-      </p>
-      {selection.normal && (
-        <p className="text-cyan-300">面方向: {_normalToLabel(selection.normal)}</p>
+      {measureResult && (
+        <div className="border-t border-gray-600 pt-1 mt-1">
+          <p className="font-semibold text-amber-400">📏 距離計測</p>
+          <p className="text-lg font-bold text-amber-300">{measureResult.distance.toFixed(2)} mm</p>
+        </div>
       )}
-      {selection.faceIndex != null && <p>面 #{selection.faceIndex}</p>}
     </div>
   );
 }
@@ -410,6 +703,42 @@ const DIM_MODE_LABELS: Record<DimensionMode, string> = {
   all: "寸法: 全体",
 };
 
+/* ---------- Measure Distance Line ---------- */
+
+function MeasureDistanceLine({
+  p1,
+  p2,
+  distance,
+}: {
+  p1: [number, number, number];
+  p2: [number, number, number];
+  distance: number;
+}) {
+  const mid: [number, number, number] = [
+    (p1[0] + p2[0]) / 2,
+    (p1[1] + p2[1]) / 2,
+    (p1[2] + p2[2]) / 2,
+  ];
+  return (
+    <group>
+      <Line points={[p1, p2]} color="#f59e0b" lineWidth={2} dashed dashScale={20} />
+      <mesh position={p1}>
+        <sphereGeometry args={[0.4]} />
+        <meshBasicMaterial color="#f59e0b" />
+      </mesh>
+      <mesh position={p2}>
+        <sphereGeometry args={[0.4]} />
+        <meshBasicMaterial color="#f59e0b" />
+      </mesh>
+      <Html position={mid} center style={{ pointerEvents: "none" }}>
+        <span className="rounded bg-amber-600/90 px-2 py-1 text-xs font-bold text-white whitespace-nowrap shadow">
+          {distance.toFixed(2)} mm
+        </span>
+      </Html>
+    </group>
+  );
+}
+
 /* ---------- Main Viewer ---------- */
 
 export function Viewer3D({
@@ -419,6 +748,8 @@ export function Viewer3D({
 }: Viewer3DProps) {
   const [dimensionMode, setDimensionMode] = useState<DimensionMode>("off");
   const [selection, setSelection] = useState<SelectionInfo | null>(null);
+  const [measureMode, setMeasureMode] = useState(false);
+  const [measureResult, setMeasureResult] = useState<MeasureResult | null>(null);
 
   const handleSelectionChange = useCallback(
     (info: SelectionInfo | null) => {
@@ -435,6 +766,10 @@ export function Viewer3D({
     });
   }, []);
 
+  const toggleMeasureMode = useCallback(() => {
+    setMeasureMode((prev) => !prev);
+  }, []);
+
   return (
     <div className="relative h-full w-full bg-gray-900" role="img" aria-label="3Dモデルビューア">
       <Canvas camera={{ position: [5, 5, 5], fov: 50 }} gl={{ antialias: true }}>
@@ -443,7 +778,9 @@ export function Viewer3D({
             <SceneContent
               gltfUrl={gltfUrl}
               dimensionMode={dimensionMode}
+              measureMode={measureMode}
               onSelectionChange={handleSelectionChange}
+              onMeasureResult={setMeasureResult}
             />
           ) : (
             <>
@@ -470,12 +807,25 @@ export function Viewer3D({
         </Suspense>
       </Canvas>
 
-      <SelectionPanel selection={selection} />
+      <SelectionPanel selection={selection} measureResult={measureResult} />
 
       <div className="absolute bottom-4 left-4 flex items-center gap-3">
         <span className="rounded bg-gray-800/80 px-3 py-1.5 text-xs text-gray-300">
-          クリック: 面選択 / ドラッグ: 回転 / スクロール: ズーム
+          {measureMode ? "面を2つクリックして距離を計測" : "クリック: 面選択 / ドラッグ: 回転 / スクロール: ズーム"}
         </span>
+        {gltfUrl && (
+          <button
+            type="button"
+            onClick={toggleMeasureMode}
+            className={`rounded px-3 py-1.5 text-xs font-medium ${
+              measureMode
+                ? "bg-amber-600 text-white ring-2 ring-amber-400"
+                : "bg-gray-700 text-gray-200 hover:bg-gray-600"
+            }`}
+          >
+            📐 距離計測{measureMode ? " ON" : ""}
+          </button>
+        )}
         {gltfUrl && (
           <button
             type="button"

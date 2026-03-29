@@ -282,7 +282,13 @@ export default function App() {
                     ? [
                         selection.meshName,
                         selection.featureId ? `Feature: ${selection.featureId}` : "",
-                        `W:${selection.dimensions.width} H:${selection.dimensions.height} D:${selection.dimensions.depth}`,
+                        selection.cylinderInfo
+                          ? `穴: Φ${selection.cylinderInfo.diameter} ${selection.cylinderInfo.axis}軸 深さ${selection.cylinderInfo.depth}`
+                          : "",
+                        selection.faceDimensions
+                          ? `面: ${selection.faceDimensions.width}×${selection.faceDimensions.height} 面積${selection.faceDimensions.area}`
+                          : "",
+                        `全体: W:${selection.dimensions.width} H:${selection.dimensions.height} D:${selection.dimensions.depth}`,
                         selection.normal
                           ? `面方向: ${selection.normal.x > 0.5 ? "+X" : selection.normal.x < -0.5 ? "-X" : ""}${selection.normal.y > 0.5 ? "+Y" : selection.normal.y < -0.5 ? "-Y" : ""}${selection.normal.z > 0.5 ? "+Z" : selection.normal.z < -0.5 ? "-Z" : "斜面"}`
                           : "",
