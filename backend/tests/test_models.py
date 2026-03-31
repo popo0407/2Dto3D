@@ -38,7 +38,6 @@ def test_node_item_defaults():
     node = NodeItem(session_id="s1")
     assert node.type == "INITIAL"
     assert node.cadquery_script == ""
-    assert node.confidence_map == {}
 
 
 def test_node_item_to_dynamo():
@@ -46,8 +45,7 @@ def test_node_item_to_dynamo():
     node = NodeItem(
         session_id="s1",
         cadquery_script="import cq",
-        confidence_map={"F1": 0.9},
     )
     d = node.to_dynamo()
     assert d["session_id"] == "s1"
-    assert d["confidence_map"] == {"F1": 0.9}
+    assert d["cadquery_script"] == "import cq"

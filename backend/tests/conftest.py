@@ -26,6 +26,9 @@ def aws_env(monkeypatch):
     monkeypatch.setenv("BEDROCK_REGION", "ap-northeast-1")
     monkeypatch.setenv("ENV_NAME", "dev")
     monkeypatch.setenv("PROJECT_NAME", "2dto3d")
+    monkeypatch.setenv("DRAWING_ELEMENTS_TABLE", "test-drawing-elements")
+    monkeypatch.setenv("CONFIDENCE_THRESHOLD", "0.85")
+    monkeypatch.setenv("MAX_VERIFY_ITERATIONS", "5")
 
 
 @pytest.fixture
@@ -76,6 +79,31 @@ def dynamodb_tables():
             KeySchema=[{"AttributeName": "connection_id", "KeyType": "HASH"}],
             AttributeDefinitions=[
                 {"AttributeName": "connection_id", "AttributeType": "S"},
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+
+        # Drawing elements table
+        client.create_table(
+            TableName="test-drawing-elements",
+            KeySchema=[
+                {"AttributeName": "drawing_id", "KeyType": "HASH"},
+                {"AttributeName": "element_seq", "KeyType": "RANGE"},
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "drawing_id", "AttributeType": "S"},
+                {"AttributeName": "element_seq", "AttributeType": "S"},
+                {"AttributeName": "confidence", "AttributeType": "N"},
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    "IndexName": "drawing_id-confidence-index",
+                    "KeySchema": [
+                        {"AttributeName": "drawing_id", "KeyType": "HASH"},
+                        {"AttributeName": "confidence", "KeyType": "RANGE"},
+                    ],
+                    "Projection": {"ProjectionType": "ALL"},
+                }
             ],
             BillingMode="PAY_PER_REQUEST",
         )
