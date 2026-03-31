@@ -319,4 +319,31 @@ nodes_table.update_item(
 
 ### 改善策・再発防止
 - AI出力にはreasoning（推論過程）を必ず含めることで、誤解釈時のデバッグが容易になる
+
+---
+
+## 再帰的寸法検証システム実装
+
+### 実施内容
+- DynamoDB `drawing_elements` テーブル追加（PK: drawing_id, SK: element_seq, GSI: confidence）
+- `dimension_extract_handler`: Bedrock マルチモーダルで図面から要素抽出・確度スコアリング
+- `dimension_verify_handler`: 低確度要素の再帰的検証（最大5反復, 閾値0.85）、テンプレートベーススクリプト組み立て、最終AI組み立て
+- Step Functions に検証ループ追加（Choice state による反復制御）
+- `ws_handler` に `verifyComment` アクション追加（人間フィードバック）
+- `VerificationPanel.tsx`: 確度バー・3Dプレビュー・コメント入力UI
+- `App.tsx`: 検証タブ・WebSocket VERIFICATION_PROGRESS ハンドリング
+- テスト7件追加（extract 2件 + verify 5件）、全40テスト合格
+
+### 発生した問題と対処
+
+| 問題 | 原因 | 対処 |
+|------|------|------|
+| DynamoDB に float 値を直接格納できない | boto3 DynamoDB resource は Python float を受け付けず Decimal が必要 | `_float_to_decimal()` ヘルパーで再帰的に変換 |
+| `position` が DynamoDB 予約語でUpdateItem失敗 | DynamoDB の予約キーワードをUpdateExpressionに直接使用 | `ExpressionAttributeNames` で `#pos` にエイリアス |
+| `confidence_map` テストが既存モデル変更で失敗 | `NodeItem` から `confidence_map` を削除したがテスト未更新 | `test_models.py` のassertを更新 |
+
+### 改善策・再発防止
+- DynamoDB にJSON由来のデータを格納するときは常に `_float_to_decimal()` で変換する
+- DynamoDB の UpdateExpression では予約語（`position`, `status`, `name` 等）を ExpressionAttributeNames でエイリアスする
+- モデル変更時は関連テストの全文検索を行い、不整合を検出する
 - 単一メッシュのGLBで面レベル選択を行うには、BufferGeometryのfaceIndexから共面三角形を検出し、オーバーレイメッシュでハイライトするアプローチが有効

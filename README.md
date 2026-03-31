@@ -68,7 +68,7 @@ python scripts/deploy.py --action destroy --environment dev
 
 ## 開発ステータス
 
-3Dモデル生成パイプライン稼働中。穴方向AI推論・面/Feature選択・チャット編集が利用可能。
+3Dモデル生成パイプライン稼働中。穴方向AI推論・面/Feature選択・チャット編集・再帰的寸法検証が利用可能。
 
 ## アーキテクチャ
 
@@ -78,9 +78,9 @@ Frontend (React 18 + Three.js)
 API Gateway → Lambda Handlers
   ↓ SQS
 Step Functions Pipeline:
-  Parse → AI Analyze (Bedrock) → CadQuery (ECS Fargate) → Optimize → Validate → Notify (WebSocket)
+  Parse → AI Analyze (Bedrock) → Extract Dimensions → [Verify Loop] → Final Assembly → CadQuery (ECS Fargate) → Optimize → Validate → Notify (WebSocket)
   ↓
-DynamoDB (Sessions / Nodes / Connections)
+DynamoDB (Sessions / Nodes / Connections / DrawingElements)
 S3 (Uploads / Artifacts / Previews / Frontend)
 CloudFront CDN
 ```
@@ -101,16 +101,18 @@ CloudFront CDN
 ├── backend/
 │   ├── common/           # 共通モジュール（config, models, bedrock_client, script_validator）
 │   ├── functions/        # Lambda ハンドラー & Fargate ランナー
-│   │   ├── upload_handler/     # セッション管理・ファイルアップロード
-│   │   ├── history_handler/    # セッション・ノード履歴管理
-│   │   ├── chat_handler/       # AIチャット（モデル修正指示）
-│   │   ├── parse_handler/      # Step 1: ファイル解析
-│   │   ├── ai_analyze_handler/ # Step 2: AI分析（Bedrock）
-│   │   ├── optimize_handler/   # Step 4: 最適化
-│   │   ├── validate_handler/   # Step 5: 検証
-│   │   ├── notify_handler/     # Step 6: WebSocket通知
-│   │   ├── ws_handler/         # WebSocket接続管理
-│   │   └── cadquery_runner/    # Step 3: Fargate CadQuery実行
+│   │   ├── upload_handler/          # セッション管理・ファイルアップロード
+│   │   ├── history_handler/         # セッション・ノード履歴管理
+│   │   ├── chat_handler/            # AIチャット（モデル修正指示）
+│   │   ├── parse_handler/           # Step 1: ファイル解析
+│   │   ├── ai_analyze_handler/      # Step 2: AI分析（Bedrock）
+│   │   ├── dimension_extract_handler/ # Step 3: 寸法要素抽出・確度スコアリング
+│   │   ├── dimension_verify_handler/  # Step 4: 再帰的寸法検証（確度閾値0.85）
+│   │   ├── optimize_handler/        # Step 6: 最適化
+│   │   ├── validate_handler/        # Step 7: 検証
+│   │   ├── notify_handler/          # Step 8: WebSocket通知
+│   │   ├── ws_handler/              # WebSocket接続管理 + verifyComment
+│   │   └── cadquery_runner/         # Step 5: Fargate CadQuery実行
 │   └── tests/            # pytest + moto テストスイート
 ├── cdk/
 │   ├── app.py            # CDKエントリーポイント（6スタック）
@@ -118,7 +120,7 @@ CloudFront CDN
 ├── frontend/
 │   ├── src/
 │   │   ├── App.tsx       # メインアプリ
-│   │   └── components/   # Viewer3D, UploadPanel, ChatPanel, HistoryPanel
+│   │   └── components/   # Viewer3D, UploadPanel, ChatPanel, HistoryPanel, VerificationPanel, LoginPanel
 │   └── package.json
 └── docs/
     └── requirements.md   # 要件定義書 v1.1.0
@@ -161,6 +163,7 @@ cdk deploy --all -c environment=prod -c useMockAI=false -c account=<ACCOUNT_ID> 
 cd backend
 PYTHONPATH=. pytest tests/ -v
 # 33 tests passed (upload, history, parse, ws, models, script_validator)
+# + 7 tests for dimension_extract/verify handlers
 ```
 
 ## デプロイ済みエンドポイント（dev環境）
