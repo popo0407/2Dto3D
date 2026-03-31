@@ -4,7 +4,7 @@ import { UploadPanel } from "./components/UploadPanel";
 import { ChatPanel } from "./components/ChatPanel";
 import { HistoryPanel } from "./components/HistoryPanel";
 import { LoginPanel } from "./components/LoginPanel";
-import { VerificationPanel, type VerificationElement } from "./components/VerificationPanel";
+import { VerificationPanel, ElementPreview, type VerificationElement } from "./components/VerificationPanel";
 import { getIdToken, signOut } from "./auth";
 import { WS_URL, API_BASE } from "./config";
 
@@ -89,6 +89,7 @@ export default function App() {
             if (msg.type === "PROGRESS") {
               setProcessingStep(msg.step ?? "");
               setProcessingProgress(msg.progress ?? 0);
+              setView("viewer");
               // Track verification state
               if (msg.step === "VERIFYING_DIMENSIONS" || msg.step === "EXTRACTING_DIMENSIONS") {
                 setIsVerifying(true);
@@ -289,14 +290,34 @@ export default function App() {
           />
         ) : (
           <>
-            <section className="flex flex-1 flex-col" aria-label="3Dビューア">
-              <Viewer3D
-                gltfUrl={gltfUrl}
-                onDownloadStep={nodeId ? () => handleDownloadStep(sessionId, nodeId, idToken) : undefined}
-                onSelectionChange={setSelection}
-              />
+            <section className="flex w-1/2 flex-col" aria-label="3Dビューア">
+              {gltfUrl ? (
+                <Viewer3D
+                  gltfUrl={gltfUrl}
+                  onDownloadStep={nodeId ? () => handleDownloadStep(sessionId, nodeId, idToken) : undefined}
+                  onSelectionChange={setSelection}
+                />
+              ) : verifyElements.length > 0 ? (
+                <div className="flex flex-1 flex-col">
+                  <div className="flex items-center gap-2 border-b bg-indigo-50 px-4 py-2">
+                    <span className="h-2 w-2 animate-pulse rounded-full bg-indigo-500" />
+                    <span className="text-xs font-semibold text-indigo-700">中間プレビュー</span>
+                  </div>
+                  <ElementPreview elements={verifyElements} className="flex-1 w-full bg-gray-900" />
+                </div>
+              ) : (
+                <div className="flex flex-1 items-center justify-center bg-gray-100">
+                  <div className="text-center">
+                    <div className="mx-auto mb-3 h-10 w-10 animate-spin rounded-full border-4 border-blue-200 border-t-blue-600" />
+                    <p className="text-sm font-medium text-gray-600">
+                      {processingStep === "PARSING" ? "ファイル解析中..." : processingStep === "AI_ANALYZING" ? "AI図面解釈中..." : processingStep === "BUILDING" ? "3Dモデル構築中..." : processingStep ? "処理中..." : "処理開始中..."}
+                    </p>
+                    <p className="mt-1 text-xs text-gray-400">{processingProgress}%</p>
+                  </div>
+                </div>
+              )}
             </section>
-            <aside className="flex w-80 flex-col border-l bg-white" aria-label="サイドパネル">
+            <aside className="flex w-1/2 flex-col border-l bg-white" aria-label="サイドパネル">
               {/* Tab switcher */}
               <div className="flex border-b">
                 <button

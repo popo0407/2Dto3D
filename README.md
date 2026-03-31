@@ -104,7 +104,7 @@ CloudFront CDN
 │   │   ├── upload_handler/          # セッション管理・ファイルアップロード
 │   │   ├── history_handler/         # セッション・ノード履歴管理
 │   │   ├── chat_handler/            # AIチャット（モデル修正指示）
-│   │   ├── parse_handler/           # Step 1: ファイル解析
+│   │   ├── parse_handler/           # Step 1: ファイル解析（DXF寸法抽出: ezdxf）
 │   │   ├── ai_analyze_handler/      # Step 2: AI分析（Bedrock）
 │   │   ├── dimension_extract_handler/ # Step 3: 寸法要素抽出・確度スコアリング
 │   │   ├── dimension_verify_handler/  # Step 4: 再帰的寸法検証（確度閾値0.85）
@@ -162,8 +162,9 @@ cdk deploy --all -c environment=prod -c useMockAI=false -c account=<ACCOUNT_ID> 
 ```bash
 cd backend
 PYTHONPATH=. pytest tests/ -v
-# 33 tests passed (upload, history, parse, ws, models, script_validator)
+# 34 tests passed (upload, history, parse, ws, models, script_validator)
 # + 7 tests for dimension_extract/verify handlers
+# parse_handler includes DXF DIMENSION extraction tests (ezdxf)
 ```
 
 ## デプロイ済みエンドポイント（dev環境）
@@ -194,3 +195,4 @@ PYTHONPATH=. pytest tests/ -v
 | 2026-03 | `Viewer3D.tsx` が glTF を描画しない → `useGLTF` による実 glTF ロード実装 |
 | 2026-03 | glTF 読み込み「Failed to fetch」CORS エラー → previews_bucket に CORS (GET) 設定追加 |
 | 2026-03 | `Stage environment="city"` による外部 HDR 301 リダイレクト → シンプルなライティング（ambientLight + directionalLight）に置換 |
+| 2026-03 | `parse_handler` DXF解析を ezdxf に置換、DIMENSION エンティティを drawing_elements テーブルに保存 |

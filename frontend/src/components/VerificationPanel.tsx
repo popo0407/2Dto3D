@@ -1,6 +1,8 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useMemo } from "react";
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
+import * as THREE from "three";
+import { Brush, Evaluator, SUBTRACTION } from "three-bvh-csg";
 
 /* ---------- Types ---------- */
 
@@ -51,57 +53,160 @@ function confidenceBadge(c: number): string {
   return "✗ 低確度";
 }
 
-/* ---------- Mini 3D Preview ---------- */
+/* ---------- Orientation → rotation ---------- */
 
-function ElementPreview({ elements }: { elements: VerificationElement[] }) {
-  return (
-    <div className="h-48 w-full rounded border bg-gray-900">
-      <Canvas camera={{ position: [150, 100, 150], fov: 50 }}>
-        <ambientLight intensity={0.6} />
-        <directionalLight position={[10, 10, 5]} intensity={0.8} />
-        {elements.map((elem) => (
-          <ElementMesh key={elem.element_seq} element={elem} />
-        ))}
-        <gridHelper args={[200, 20, "#444", "#333"]} />
-        <OrbitControls enableDamping />
-      </Canvas>
-    </div>
-  );
+function orientationToEuler(orient: string): THREE.Euler {
+  switch (orient) {
+    case "+Z": case "-Z":
+      return new THREE.Euler(Math.PI / 2, 0, 0);
+    case "+X": case "-X":
+      return new THREE.Euler(0, 0, Math.PI / 2);
+    case "+Y": case "-Y":
+      return new THREE.Euler(0, 0, 0);
+    default:
+      return new THREE.Euler(Math.PI / 2, 0, 0);
+  }
 }
 
-function ElementMesh({ element }: { element: VerificationElement }) {
-  const { dimensions, position, confidence, element_type } = element;
-  const pos: [number, number, number] = [
-    position?.x ?? 0,
-    position?.y ?? 0,
-    position?.z ?? 0,
-  ];
+/* ---------- CSG Preview with boolean subtraction ---------- */
 
-  const color = confidence >= 0.85
-    ? "#22c55e"
-    : confidence >= 0.6
-      ? "#eab308"
-      : "#ef4444";
+function buildCSGMesh(elements: VerificationElement[]): THREE.BufferGeometry | null {
+  const baseElements = elements.filter((e) => e.element_type === "box");
+  const holeElements = elements.filter((e) => e.element_type === "hole");
 
-  if (element_type === "hole") {
-    const diameter = dimensions?.diameter ?? 6;
-    const depth = dimensions?.depth ?? 10;
+  if (baseElements.length === 0) return null;
+
+  const base = baseElements[0];
+  if (!base) return null;
+  const w = (base.dimensions?.width as number) ?? 10;
+  const h = (base.dimensions?.height as number) ?? 10;
+  const d = (base.dimensions?.depth as number) ?? 10;
+
+  const boxGeo = new THREE.BoxGeometry(w, h, d);
+  let result = new Brush(boxGeo);
+  result.position.set(
+    base.position?.x ?? 0,
+    base.position?.y ?? 0,
+    base.position?.z ?? 0,
+  );
+  result.updateMatrixWorld(true);
+
+  const evaluator = new Evaluator();
+
+  for (const hole of holeElements) {
+    const diameter = (hole.dimensions?.diameter as number) ?? 6;
+    const depth = (hole.dimensions?.depth as number) ?? d + 2;
+    const cylGeo = new THREE.CylinderGeometry(
+      diameter / 2, diameter / 2, depth + 2, 32,
+    );
+
+    const holeBrush = new Brush(cylGeo);
+    holeBrush.position.set(
+      hole.position?.x ?? 0,
+      hole.position?.y ?? 0,
+      hole.position?.z ?? 0,
+    );
+    holeBrush.rotation.copy(orientationToEuler(hole.orientation));
+    holeBrush.updateMatrixWorld(true);
+
+    try {
+      result = evaluator.evaluate(result, holeBrush, SUBTRACTION);
+    } catch {
+      continue;
+    }
+  }
+
+  return result.geometry;
+}
+
+function CSGPreview({ elements }: { elements: VerificationElement[] }) {
+  const geometry = useMemo(() => buildCSGMesh(elements), [elements]);
+
+  const minConfidence = useMemo(() => {
+    if (elements.length === 0) return 0;
+    return Math.min(...elements.map((e) => e.confidence));
+  }, [elements]);
+
+  const meshColor = minConfidence >= 0.85
+    ? "#6b9080"
+    : minConfidence >= 0.6
+      ? "#a68a64"
+      : "#a06060";
+
+  if (!geometry) {
     return (
-      <mesh position={pos}>
-        <cylinderGeometry args={[diameter / 2, diameter / 2, depth, 16]} />
-        <meshStandardMaterial color={color} transparent opacity={0.7} wireframe />
+      <mesh>
+        <boxGeometry args={[10, 10, 10]} />
+        <meshStandardMaterial color="#666" wireframe />
       </mesh>
     );
   }
 
-  const w = dimensions?.width ?? 10;
-  const h = dimensions?.height ?? 10;
-  const d = dimensions?.depth ?? 10;
   return (
-    <mesh position={pos}>
-      <boxGeometry args={[w, h, d]} />
-      <meshStandardMaterial color={color} transparent opacity={0.6} />
+    <mesh geometry={geometry}>
+      <meshStandardMaterial
+        color={meshColor}
+        roughness={0.4}
+        metalness={0.1}
+      />
     </mesh>
+  );
+}
+
+function HoleMarkers({ elements }: { elements: VerificationElement[] }) {
+  const holes = elements.filter((e) => e.element_type === "hole");
+  return (
+    <>
+      {holes.map((hole) => {
+        const diameter = (hole.dimensions?.diameter as number) ?? 6;
+        const depth = (hole.dimensions?.depth as number) ?? 10;
+        const color = hole.confidence >= 0.85
+          ? "#22c55e"
+          : hole.confidence >= 0.6
+            ? "#eab308"
+            : "#ef4444";
+
+        return (
+          <mesh
+            key={hole.element_seq}
+            position={[
+              hole.position?.x ?? 0,
+              hole.position?.y ?? 0,
+              hole.position?.z ?? 0,
+            ]}
+            rotation={orientationToEuler(hole.orientation)}
+          >
+            <cylinderGeometry args={[diameter / 2 + 0.3, diameter / 2 + 0.3, depth + 1, 32]} />
+            <meshBasicMaterial color={color} wireframe transparent opacity={0.4} />
+          </mesh>
+        );
+      })}
+    </>
+  );
+}
+
+export function ElementPreview({ elements, className }: { elements: VerificationElement[]; className?: string }) {
+  const base = elements.find((e) => e.element_type === "box");
+  const maxDim = base
+    ? Math.max(
+        (base.dimensions?.width as number) ?? 50,
+        (base.dimensions?.height as number) ?? 50,
+        (base.dimensions?.depth as number) ?? 50,
+      )
+    : 50;
+  const camDist = maxDim * 1.8;
+
+  return (
+    <div className={className ?? "h-48 w-full rounded border bg-gray-900"}>
+      <Canvas camera={{ position: [camDist, camDist * 0.7, camDist], fov: 45 }}>
+        <ambientLight intensity={0.5} />
+        <directionalLight position={[camDist, camDist, camDist * 0.5]} intensity={0.8} />
+        <CSGPreview elements={elements} />
+        <HoleMarkers elements={elements} />
+        <gridHelper args={[maxDim * 3, 20, "#444", "#333"]} />
+        <OrbitControls enableDamping />
+      </Canvas>
+    </div>
   );
 }
 
@@ -163,14 +268,6 @@ export function VerificationPanel({
           </div>
         </div>
       </div>
-
-      {/* 3D Preview */}
-      {elements.length > 0 && (
-        <div className="border-b p-2">
-          <p className="mb-1 text-xs font-medium text-gray-500">中間プレビュー</p>
-          <ElementPreview elements={elements} />
-        </div>
-      )}
 
       {/* Element list */}
       <div className="flex-1 overflow-y-auto">

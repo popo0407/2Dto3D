@@ -346,4 +346,32 @@ nodes_table.update_item(
 - DynamoDB にJSON由来のデータを格納するときは常に `_float_to_decimal()` で変換する
 - DynamoDB の UpdateExpression では予約語（`position`, `status`, `name` 等）を ExpressionAttributeNames でエイリアスする
 - モデル変更時は関連テストの全文検索を行い、不整合を検出する
+
+---
+
+## DXF寸法抽出機能（ezdxf 導入）
+
+### 実施日: 2026-03-31
+
+### 概要
+`parse_handler` の DXF 解析を手動文字列パースから `ezdxf` ライブラリに移行。DIMENSION エンティティを `drawing_elements` DynamoDB テーブルに保存する機能を追加。
+
+### 変更内容
+| ファイル | 変更内容 |
+|---------|---------|
+| `backend/requirements.txt` | `ezdxf>=1.0.0` 追加 |
+| `cdk/lib/constructs/python_layer.py` | requirements.txt の pip install をレイヤービルドに統合 |
+| `backend/functions/parse_handler/index.py` | `_parse_dxf()` を ezdxf ベースに書き換え、DIMENSION 抽出・DB保存 |
+| `backend/tests/test_parse_handler.py` | ezdxf で DXF 生成するテストに書き換え + DIMENSION テスト追加 |
+
+### 検出された問題と対処
+
+| 問題 | 原因 | 対処 |
+|------|------|------|
+| `ezdxf.write(BytesIO)` で TypeError | ezdxf は `StringIO`（テキストストリーム）に書き出す仕様 | テスト側で `StringIO` → `.encode()` に修正 |
+| `ezdxf.read()` にバイトストリーム渡して失敗 | S3 から取得したバイトをそのまま渡していた | `decode()` → `StringIO` に変換してから `ezdxf.read()` に渡す |
+
+### 改善策・再発防止
+- `ezdxf` の I/O はテキストストリーム (`StringIO`) を使うこと（バイナリストリームは非対応）
+- Lambda Layer に pip パッケージを含める場合は `python_layer.py` で `pip install -t` を使用する
 - 単一メッシュのGLBで面レベル選択を行うには、BufferGeometryのfaceIndexから共面三角形を検出し、オーバーレイメッシュでハイライトするアプローチが有効
