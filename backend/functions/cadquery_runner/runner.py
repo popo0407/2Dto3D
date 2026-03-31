@@ -140,11 +140,11 @@ def execute_cadquery(script: str, work_dir: str) -> dict:
     # Export GLB via STL → trimesh → GLB pipeline (single binary, no external .bin)
     stl_path = os.path.join(work_dir, "output.stl")
     glb_path = os.path.join(work_dir, "output.glb")
-    # High-resolution STL: small tolerances → smoother curved surfaces
+    # Web-preview STL: relaxed tolerances for smaller GLB while preserving visual quality
     cq.exporters.export(
         result, stl_path, exportType="STL",
-        tolerance=0.01,       # linear tolerance 0.01mm
-        angularTolerance=0.1, # angular tolerance 0.1 radians (~6°)
+        tolerance=0.05,       # linear tolerance 0.05mm (web preview)
+        angularTolerance=0.3, # angular tolerance 0.3 radians (~17°)
     )
 
     import trimesh
@@ -154,6 +154,12 @@ def execute_cadquery(script: str, work_dir: str) -> dict:
     # Re-merge coplanar faces to reduce visual artifacts on flat surfaces
     if hasattr(mesh, 'merge_vertices'):
         mesh.merge_vertices()
+    # Cap polygon count to keep GLB lightweight for browser rendering
+    MAX_FACES = 30_000
+    if hasattr(mesh, 'faces') and len(mesh.faces) > MAX_FACES:
+        logger.info("Decimating mesh: %d faces → %d faces", len(mesh.faces), MAX_FACES)
+        mesh = mesh.simplify_quadric_decimation(MAX_FACES)
+    logger.info("Final mesh: %d faces, exporting GLB", len(mesh.faces) if hasattr(mesh, 'faces') else 0)
     mesh.export(glb_path, file_type="glb")
 
     return {
