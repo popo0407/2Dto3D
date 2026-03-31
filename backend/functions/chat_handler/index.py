@@ -16,7 +16,6 @@ SESSIONS_TABLE = os.environ.get("SESSIONS_TABLE", "")
 NODES_TABLE = os.environ.get("NODES_TABLE", "")
 ARTIFACTS_BUCKET = os.environ.get("ARTIFACTS_BUCKET", "")
 PROCESSING_QUEUE_URL = os.environ.get("PROCESSING_QUEUE_URL", "")
-USE_MOCK_AI = os.environ.get("USE_MOCK_AI", "true").lower() == "true"
 BEDROCK_REGION = os.environ.get("BEDROCK_REGION", "ap-northeast-1")
 
 dynamodb = boto3.resource("dynamodb")
@@ -62,23 +61,50 @@ def lambda_handler(event: dict, context) -> dict:
 【ユーザーの指示】
 {user_message}
 
+【穴の方向ルール】
+- `.hole()` はデフォルトで現在のワークプレーンの法線方向に穴を開ける
+- **穴を開ける面（ドリル面）を必ず `.faces("...").workplane()` で指定すること**
+  - Z方向の穴: `.faces(">Z").workplane()` or `.faces("<Z").workplane()` で `.hole()`
+  - Y方向の穴: `.faces(">Y").workplane()` or `.faces("<Y").workplane()` で `.hole()`
+  - X方向の穴: `.faces(">X").workplane()` or `.faces("<X").workplane()` で `.hole()`
+- 穴が貫通穴か止まり穴かは図面の指示に従う（無条件に貫通穴と仮定しないこと）
+- **`.faces("...").workplane()` を省略すると穴の位置・方向が狂うので絶対に省略しないこと**
+
+【穴のグループ化ルール】
+- 同じドリル面・同じ径・同じ深さの穴はグループにまとめ `.pushPoints()` で一括処理する
+- 穴が1個でも `.pushPoints([(x, y)]).hole(d)` の形式で統一する
+- 穴あけは必ず `.faces("...").workplane().pushPoints([...]).hole(d)` 形式（例外なし）
+
+【CadQuery座標系の注意】
+- `.box()` は原点中心に生成される（左端=-W/2, 右端=+W/2, 下端=-H/2, 上端=+H/2）
+- 穴位置を指定するとき、CadQuery原点（=箱の中心）からの相対座標を使うこと
+
+【ルール】
+- 修正後の完全なスクリプトを出力する（差分ではなく全体）
+- show_object() は使用禁止
+- 各フィーチャーに `# Feature-NNN:` コメントを付ける
+- 穴は通し番号 `# Hole-NNN:` で管理する（番号・径・方向・貫通/止まり・ドリル面・座標を記載）
+- 同一面・同一径・同一深さの穴はグループ化: `# Hole Group A: ...`
+
 【出力フォーマット(JSON)】
 {{
   "cadquery_script": "修正後の完全なスクリプト",
-  "confidence_map": {{"Feature-001": 0.95}},
   "diff_summary": "変更箇所の要約"
 }}"""
 
     # Invoke AI
     from common.bedrock_client import get_bedrock_client
 
-    client = get_bedrock_client(use_mock=USE_MOCK_AI, region=BEDROCK_REGION)
-    raw_response = client.invoke_multimodal(prompt=prompt)
+    try:
+        client = get_bedrock_client(region=BEDROCK_REGION)
+        raw_response = client.invoke_multimodal(prompt=prompt)
+    except Exception as e:
+        logger.error("Bedrock invocation failed: %s", e)
+        return _response(502, {"error": f"AI invocation failed: {e}"})
 
     # Parse response
     ai_output = _parse_ai_response(raw_response)
     new_script = ai_output.get("cadquery_script", parent_script)
-    confidence_map = ai_output.get("confidence_map", parent_node.get("confidence_map", {}))
 
     # Validate
     from common.script_validator import validate_cadquery_script, ScriptValidationError
@@ -103,9 +129,7 @@ def lambda_handler(event: dict, context) -> dict:
         "diff_patch": ai_output.get("diff_summary", ""),
         "step_s3_key": "",
         "gltf_s3_key": "",
-        "confidence_map": confidence_map,
         "user_message": user_message,
-        "ai_questions": [],
         "created_at": now,
     }
     nodes_table.put_item(Item=new_node)
@@ -155,7 +179,7 @@ def _parse_ai_response(raw: str) -> dict:
         except json.JSONDecodeError:
             pass
 
-    return {"cadquery_script": "", "confidence_map": {}, "diff_summary": ""}
+    return {"cadquery_script": "", "diff_summary": ""}
 
 
 def _response(status_code: int, body: dict) -> dict:

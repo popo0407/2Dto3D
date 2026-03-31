@@ -64,15 +64,15 @@ def lambda_handler(event: dict, context) -> dict:
     # If STEP file exists, generate a preview-optimized copy
     if step_key:
         try:
-            preview_key = f"previews/{session_id}/{node_id}/preview.gltf"
+            preview_key = f"previews/{session_id}/{node_id}/preview.glb"
 
             if gltf_key:
-                # Copy glTF to previews bucket for CDN serving
+                # Copy GLB to previews bucket for CDN serving
                 s3_client.copy_object(
                     CopySource={"Bucket": ARTIFACTS_BUCKET, "Key": gltf_key},
                     Bucket=PREVIEWS_BUCKET,
                     Key=preview_key,
-                    ContentType="model/gltf+json",
+                    ContentType="model/gltf-binary",
                 )
                 optimized = True
                 logger.info("Copied glTF to previews: %s", preview_key)

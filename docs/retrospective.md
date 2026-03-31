@@ -279,3 +279,71 @@ nodes_table.update_item(
   ```
 - Bedrock IAM ポリシードキュメント作成時は公式 AWS ドキュメント（Bedrock IAM permissions guide）を参照し、常に3つのアクションをセットで含める
 - Lambda エラーログが `aws-marketplace:` を含む場合は、CDK で定義した IAM ポリシーの action リストを確認し、AWS Marketplace 権限が含まれているか確認する、直接 `InvokeModel` には使えない
+
+---
+
+## 2026-03 穴方向プロンプト改善・面選択強化・確度情報削除
+
+### 実施内容
+- AIが生成するCadQueryスクリプトで穴の向きが誤る問題をプロンプト改善で対処
+- 3Dビューアの選択機能を面（face）/Feature単位に強化
+- 不要になった確度情報（confidence_map）をシステム全体から完全削除
+
+### 発生した問題と対処
+
+| 問題 | 原因 | 対処 |
+|------|------|------|
+| 穴の向きが正面図・側面図で逆方向に生成される | プロンプトに2D図面→3D軸方向のマッピングルールが不足 | `_build_image_prompt`・`_build_prompt`・chat promptに詳細な穴方向ルール（6方向×ワークプレーン選択）を追加 |
+| 3Dビューアで面やFeature単位の選択ができない | SelectionInfoにmeshName/positionのみで、normal/featureIdがなかった | SelectionTypeを追加、face normalの抽出、featureId正規表現抽出、方向ラベル表示を実装 |
+| confidence_mapが未使用のまま残存 | 初期設計で確度表示を想定していたが不要になった | backend（ai_analyze_handler, chat_handler, models.py）およびfrontend（Viewer3D, App.tsx）から完全削除 |
+
+### 改善策・再発防止
+- CadQueryスクリプト生成プロンプトには2D図面の投影方向→3D軸方向の明示的マッピングを必ず含める
+- 不要になった機能（確度表示等）はコード・プロンプト・モデル定義から漏れなく削除し、技術的負債を溜めない
+- 3Dインタラクションではface normalやfeatureIdを含むリッチな選択情報をチャットコンテキストに渡すことでAIの修正精度が向上する
+
+---
+
+## 2026-03 AI推論理由表示・面レベルハイライト実装
+
+### 実施内容
+- AIが図面を解析した推論理由（reasoning）をプロンプトで出力させ、DynamoDBに保存、WebSocket経由でフロントエンドに表示
+- 3Dビューアの面選択をメッシュ全体から個別面（共面三角形群）のハイライトに変更
+
+### 発生した問題と対処
+
+| 問題 | 原因 | 対処 |
+|------|------|------|
+| AIが図面を誤解釈しても理由が不明 | プロンプトがスクリプトのみ出力していた | reasoningフィールドをプロンプトに追加し、解析過程をstepごとに出力させる |
+| 面クリックでモデル全体がハイライトされる | trimeshがGLBを単一メッシュとして出力するため、マテリアル全体が変更されていた | 共面三角形検出（同一法線+同一平面）でクリック面のみのオーバーレイメッシュを生成し表示 |
+
+### 改善策・再発防止
+- AI出力にはreasoning（推論過程）を必ず含めることで、誤解釈時のデバッグが容易になる
+
+---
+
+## 再帰的寸法検証システム実装
+
+### 実施内容
+- DynamoDB `drawing_elements` テーブル追加（PK: drawing_id, SK: element_seq, GSI: confidence）
+- `dimension_extract_handler`: Bedrock マルチモーダルで図面から要素抽出・確度スコアリング
+- `dimension_verify_handler`: 低確度要素の再帰的検証（最大5反復, 閾値0.85）、テンプレートベーススクリプト組み立て、最終AI組み立て
+- Step Functions に検証ループ追加（Choice state による反復制御）
+- `ws_handler` に `verifyComment` アクション追加（人間フィードバック）
+- `VerificationPanel.tsx`: 確度バー・3Dプレビュー・コメント入力UI
+- `App.tsx`: 検証タブ・WebSocket VERIFICATION_PROGRESS ハンドリング
+- テスト7件追加（extract 2件 + verify 5件）、全40テスト合格
+
+### 発生した問題と対処
+
+| 問題 | 原因 | 対処 |
+|------|------|------|
+| DynamoDB に float 値を直接格納できない | boto3 DynamoDB resource は Python float を受け付けず Decimal が必要 | `_float_to_decimal()` ヘルパーで再帰的に変換 |
+| `position` が DynamoDB 予約語でUpdateItem失敗 | DynamoDB の予約キーワードをUpdateExpressionに直接使用 | `ExpressionAttributeNames` で `#pos` にエイリアス |
+| `confidence_map` テストが既存モデル変更で失敗 | `NodeItem` から `confidence_map` を削除したがテスト未更新 | `test_models.py` のassertを更新 |
+
+### 改善策・再発防止
+- DynamoDB にJSON由来のデータを格納するときは常に `_float_to_decimal()` で変換する
+- DynamoDB の UpdateExpression では予約語（`position`, `status`, `name` 等）を ExpressionAttributeNames でエイリアスする
+- モデル変更時は関連テストの全文検索を行い、不整合を検出する
+- 単一メッシュのGLBで面レベル選択を行うには、BufferGeometryのfaceIndexから共面三角形を検出し、オーバーレイメッシュでハイライトするアプローチが有効

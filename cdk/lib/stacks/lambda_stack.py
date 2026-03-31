@@ -111,6 +111,7 @@ class LambdaStack(Stack):
         uploads_bucket.grant_read(upload_fn)
 
         history_fn = create_function("history_handler")
+        artifacts_bucket.grant_read(history_fn)
 
         chat_fn = create_function(
             "chat_handler",

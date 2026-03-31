@@ -100,16 +100,24 @@ def execute_cadquery(script: str, work_dir: str) -> dict:
     """Execute CadQuery script and export STEP + glTF."""
     import cadquery as cq
 
+    import math
+
+    # No-op stubs for CadQuery GUI functions that AI may include
+    def _noop(*args, **kwargs):
+        pass
+
     # Execute script in restricted namespace.
     # __import__ is required for `import cadquery as cq` inside the script.
     # Security is enforced by validate_script() (AST check) before this call.
-    namespace = {"cq": cq, "__builtins__": {
+    namespace = {"cq": cq, "math": math, "show_object": _noop, "debug": _noop, "log": _noop, "__builtins__": {
         "__import__": __import__,
         "range": range, "len": len, "int": int, "float": float,
         "str": str, "list": list, "dict": dict, "tuple": tuple,
         "True": True, "False": False, "None": None,
         "print": print, "abs": abs, "min": min, "max": max,
         "round": round, "enumerate": enumerate, "zip": zip,
+        "map": map, "filter": filter, "sorted": sorted,
+        "isinstance": isinstance, "type": type, "bool": bool,
     }}
 
     exec(script, namespace)  # noqa: S102 - Script is validated before execution
@@ -129,42 +137,51 @@ def execute_cadquery(script: str, work_dir: str) -> dict:
     step_path = os.path.join(work_dir, "output.step")
     cq.exporters.export(result, step_path, exportType="STEP")
 
-    # Export glTF via STL → trimesh → glTF pipeline
+    # Export GLB via STL → trimesh → GLB pipeline (single binary, no external .bin)
     stl_path = os.path.join(work_dir, "output.stl")
-    gltf_path = os.path.join(work_dir, "output.gltf")
-    cq.exporters.export(result, stl_path, exportType="STL")
+    glb_path = os.path.join(work_dir, "output.glb")
+    # High-resolution STL: small tolerances → smoother curved surfaces
+    cq.exporters.export(
+        result, stl_path, exportType="STL",
+        tolerance=0.01,       # linear tolerance 0.01mm
+        angularTolerance=0.1, # angular tolerance 0.1 radians (~6°)
+    )
 
     import trimesh
+    import numpy as np
 
     mesh = trimesh.load(stl_path)
-    mesh.export(gltf_path, file_type="gltf")
+    # Re-merge coplanar faces to reduce visual artifacts on flat surfaces
+    if hasattr(mesh, 'merge_vertices'):
+        mesh.merge_vertices()
+    mesh.export(glb_path, file_type="glb")
 
     return {
         "step_path": step_path,
-        "gltf_path": gltf_path,
+        "glb_path": glb_path,
         "step_size": os.path.getsize(step_path),
-        "gltf_size": os.path.getsize(gltf_path),
+        "glb_size": os.path.getsize(glb_path),
     }
 
 
 def upload_artifacts(work_dir_result: dict) -> dict:
-    """Upload STEP and glTF files to S3."""
+    """Upload STEP and GLB files to S3."""
     step_key = f"artifacts/{SESSION_ID}/{NODE_ID}/output.step"
-    gltf_key = f"artifacts/{SESSION_ID}/{NODE_ID}/output.gltf"
+    glb_key = f"artifacts/{SESSION_ID}/{NODE_ID}/output.glb"
 
     s3_client.upload_file(
         work_dir_result["step_path"], ARTIFACTS_BUCKET, step_key,
         ExtraArgs={"ContentType": "application/step"},
     )
     s3_client.upload_file(
-        work_dir_result["gltf_path"], ARTIFACTS_BUCKET, gltf_key,
-        ExtraArgs={"ContentType": "model/gltf+json"},
+        work_dir_result["glb_path"], ARTIFACTS_BUCKET, glb_key,
+        ExtraArgs={"ContentType": "model/gltf-binary"},
     )
 
-    logger.info("Uploaded STEP (%d bytes) and glTF (%d bytes)",
-                work_dir_result["step_size"], work_dir_result["gltf_size"])
+    logger.info("Uploaded STEP (%d bytes) and GLB (%d bytes)",
+                work_dir_result["step_size"], work_dir_result["glb_size"])
 
-    return {"step_s3_key": step_key, "gltf_s3_key": gltf_key}
+    return {"step_s3_key": step_key, "gltf_s3_key": glb_key}
 
 
 def update_node(s3_keys: dict) -> None:

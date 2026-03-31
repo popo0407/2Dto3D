@@ -4,10 +4,10 @@ import { API_BASE } from "../config";
 interface UploadPanelProps {
   idToken: string;
   onSessionCreated: (sessionId: string) => void;
-  onProcessingComplete: (nodeId: string, gltfUrl: string) => void;
+  onProcessingComplete: (nodeId: string, gltfUrl: string, reasoning?: string) => void;
   onProcessingStart: (
     sessionId: string,
-    onComplete: (nodeId: string, url: string) => void,
+    onComplete: (nodeId: string, url: string, reasoning?: string) => void,
     onError: (msg: string) => void,
   ) => Promise<void>;
   processingStep: string;
@@ -100,9 +100,9 @@ export function UploadPanel({ idToken, onSessionCreated, onProcessingComplete, o
       setStatus("processing");
       await onProcessingStart(
         session.session_id,
-        (nid, url) => {
+        (nid, url, reasoning) => {
           setStatus("idle");
-          onProcessingComplete(nid, url);
+          onProcessingComplete(nid, url, reasoning);
         },
         (msg) => {
           setError(msg);
