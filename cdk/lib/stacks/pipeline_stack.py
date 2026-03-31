@@ -42,6 +42,7 @@ class PipelineStack(Stack):
         artifacts_bucket: s3.Bucket,
         previews_bucket: s3.Bucket,
         websocket_api: apigwv2.WebSocketApi,
+        drawing_elements_table: dynamodb.Table,
         enable_fargate: bool = False,
         **kwargs,
     ) -> None:
@@ -58,6 +59,9 @@ class PipelineStack(Stack):
             "ARTIFACTS_BUCKET": artifacts_bucket.bucket_name,
             "PREVIEWS_BUCKET": previews_bucket.bucket_name,
             "WEBSOCKET_API_ID": websocket_api.api_id,
+            "DRAWING_ELEMENTS_TABLE": drawing_elements_table.table_name,
+            "CONFIDENCE_THRESHOLD": "0.85",
+            "MAX_VERIFY_ITERATIONS": "5",
         }
 
         # ---------- Common Layer ----------
@@ -104,6 +108,7 @@ class PipelineStack(Stack):
             sessions_table.grant_read_write_data(fn)
             nodes_table.grant_read_write_data(fn)
             connections_table.grant_read_write_data(fn)
+            drawing_elements_table.grant_read_write_data(fn)
             uploads_bucket.grant_read(fn)
             artifacts_bucket.grant_read_write(fn)
             previews_bucket.grant_read_write(fn)
@@ -125,6 +130,18 @@ class PipelineStack(Stack):
             "ai_analyze_handler", timeout_seconds=300, memory_mb=1024
         )
         ai_analyze_fn.add_to_role_policy(bedrock_policy)
+
+        # Step 2.5: Dimension Extract handler
+        dimension_extract_fn = pipeline_lambda(
+            "dimension_extract_handler", timeout_seconds=300, memory_mb=1024
+        )
+        dimension_extract_fn.add_to_role_policy(bedrock_policy)
+
+        # Step 2.6: Dimension Verify handler
+        dimension_verify_fn = pipeline_lambda(
+            "dimension_verify_handler", timeout_seconds=300, memory_mb=1024
+        )
+        dimension_verify_fn.add_to_role_policy(bedrock_policy)
 
         # Step 4: Optimize handler
         optimize_fn = pipeline_lambda(
@@ -294,6 +311,42 @@ class PipelineStack(Stack):
             result_path="$",
         )
 
+        # Dimension extraction step
+        extract_dimensions_step = tasks.LambdaInvoke(
+            self,
+            "ExtractDimensionsStep",
+            lambda_function=dimension_extract_fn,
+            payload_response_only=True,
+            result_path="$",
+        )
+
+        # Dimension verification step (used in loop)
+        verify_dimensions_step = tasks.LambdaInvoke(
+            self,
+            "VerifyDimensionsStep",
+            lambda_function=dimension_verify_fn,
+            payload_response_only=True,
+            result_path="$",
+        )
+
+        # Final assembly step (is_final=true)
+        final_assembly_step = tasks.LambdaInvoke(
+            self,
+            "FinalAssemblyStep",
+            lambda_function=dimension_verify_fn,
+            payload=sfn.TaskInput.from_object({
+                "session_id": sfn.JsonPath.string_at("$.session_id"),
+                "node_id": sfn.JsonPath.string_at("$.node_id"),
+                "iteration_count": sfn.JsonPath.number_at("$.iteration_count"),
+                "cadquery_script": sfn.JsonPath.string_at("$.cadquery_script"),
+                "total_elements": sfn.JsonPath.number_at("$.total_elements"),
+                "low_confidence_count": sfn.JsonPath.number_at("$.low_confidence_count"),
+                "is_final": True,
+            }),
+            payload_response_only=True,
+            result_path="$",
+        )
+
         optimize_step = tasks.LambdaInvoke(
             self,
             "OptimizeStep",
@@ -318,10 +371,30 @@ class PipelineStack(Stack):
             result_path="$",
         )
 
+        # ---------- Verification Loop ----------
+        # Choice state: check if all elements are verified or max iterations reached
+        verification_choice = sfn.Choice(self, "AllElementsVerified?")
+
+        verification_choice.when(
+            sfn.Condition.boolean_equals("$.all_verified", True),
+            final_assembly_step,
+        ).when(
+            sfn.Condition.number_greater_than_equals("$.iteration_count", 5),
+            final_assembly_step,
+        ).otherwise(
+            verify_dimensions_step,
+        )
+
+        # Wire the verify step to the choice
+        verify_dimensions_step.next(verification_choice)
+
         # 全ステップでエラーをキャッチして WebSocket 経由でフロントエンドに通知
         for step_to_catch in [
             parse_step,
             ai_analyze_step,
+            extract_dimensions_step,
+            verify_dimensions_step,
+            final_assembly_step,
             cadquery_step,
             optimize_step,
             validate_step,
@@ -333,13 +406,18 @@ class PipelineStack(Stack):
                 result_path="$.error",
             )
 
+        # Pipeline definition:
+        # Parse → AI Analyze → Extract Dimensions → Verify (loop) → Final Assembly
+        # → CadQuery → Optimize → Validate → Notify
         definition = (
             parse_step.next(ai_analyze_step)
-            .next(cadquery_step)
-            .next(optimize_step)
-            .next(validate_step)
-            .next(notify_step)
+            .next(extract_dimensions_step)
+            .next(verify_dimensions_step)
+            # verify_dimensions_step → verification_choice → loop or final_assembly_step
         )
+        final_assembly_step.next(cadquery_step).next(optimize_step).next(
+            validate_step
+        ).next(notify_step)
 
         self.state_machine = sfn.StateMachine(
             self,
