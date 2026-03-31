@@ -4,14 +4,16 @@ import { UploadPanel } from "./components/UploadPanel";
 import { ChatPanel } from "./components/ChatPanel";
 import { HistoryPanel } from "./components/HistoryPanel";
 import { LoginPanel } from "./components/LoginPanel";
+import { VerificationPanel, type VerificationElement } from "./components/VerificationPanel";
 import { getIdToken, signOut } from "./auth";
 import { WS_URL, API_BASE } from "./config";
 
 type AppView = "upload" | "viewer";
+type SideTab = "chat" | "verify";
 
 // WebSocket から届く通知メッセージの型
 interface WsNotifyMessage {
-  type: "PROCESSING_COMPLETE" | "PROCESSING_FAILED" | "PROGRESS" | "AI_QUESTION" | string;
+  type: "PROCESSING_COMPLETE" | "PROCESSING_FAILED" | "PROGRESS" | "AI_QUESTION" | "VERIFICATION_PROGRESS" | string;
   session_id?: string;
   node_id?: string;
   gltf_url?: string;
@@ -21,6 +23,16 @@ interface WsNotifyMessage {
   progress?: number;
   message?: string;
   questions?: AiQuestion[];
+  // Verification-specific fields
+  iteration_count?: number;
+  all_verified?: boolean;
+  elements?: VerificationElement[];
+}
+
+interface VerificationIteration {
+  iteration: number;
+  elements: VerificationElement[];
+  timestamp: number;
 }
 
 interface AiQuestion {
@@ -43,6 +55,13 @@ export default function App() {
   const [aiReasoning, setAiReasoning] = useState<string>("");
   const [selection, setSelection] = useState<SelectionInfo | null>(null);
   const [chatPipelineComplete, setChatPipelineComplete] = useState(false);
+  const [sideTab, setSideTab] = useState<SideTab>("chat");
+
+  // Verification state
+  const [verifyElements, setVerifyElements] = useState<VerificationElement[]>([]);
+  const [verifyIterations, setVerifyIterations] = useState<VerificationIteration[]>([]);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [currentVerifyIteration, setCurrentVerifyIteration] = useState(0);
 
   // WebSocket ref（セッションをまたいで保持）
   const wsRef = useRef<WebSocket | null>(null);
@@ -70,13 +89,34 @@ export default function App() {
             if (msg.type === "PROGRESS") {
               setProcessingStep(msg.step ?? "");
               setProcessingProgress(msg.progress ?? 0);
+              // Track verification state
+              if (msg.step === "VERIFYING_DIMENSIONS" || msg.step === "EXTRACTING_DIMENSIONS") {
+                setIsVerifying(true);
+                setSideTab("verify");
+              }
+            } else if (msg.type === "VERIFICATION_PROGRESS") {
+              const elems = msg.elements ?? [];
+              setVerifyElements(elems);
+              setCurrentVerifyIteration(msg.iteration_count ?? 0);
+              setIsVerifying(!msg.all_verified);
+              setVerifyIterations((prev) => [
+                ...prev,
+                {
+                  iteration: msg.iteration_count ?? 0,
+                  elements: elems,
+                  timestamp: Date.now(),
+                },
+              ]);
+              setSideTab("verify");
             } else if (msg.type === "AI_QUESTION" && msg.questions?.length) {
             setAiQuestions(msg.questions);
           } else if (msg.type === "PROCESSING_COMPLETE" && msg.node_id && msg.gltf_url) {
               setProcessingProgress(100);
+              setIsVerifying(false);
               ws.close();
               onComplete(msg.node_id, msg.gltf_url, msg.ai_reasoning);
             } else if (msg.type === "PROCESSING_FAILED") {
+              setIsVerifying(false);
               ws.close();
               onError(msg.error ?? "処理に失敗しました");
             }
@@ -139,8 +179,28 @@ export default function App() {
     setProcessingProgress(0);
     setAiQuestions([]);
     setAiReasoning("");
+    setVerifyElements([]);
+    setVerifyIterations([]);
+    setIsVerifying(false);
+    setCurrentVerifyIteration(0);
+    setSideTab("chat");
     setView("upload");
   };
+
+  const handleVerifyComment = useCallback(
+    (comment: string) => {
+      if (wsRef.current?.readyState === WebSocket.OPEN && sessionId) {
+        wsRef.current.send(
+          JSON.stringify({
+            action: "verifyComment",
+            session_id: sessionId,
+            comment,
+          }),
+        );
+      }
+    },
+    [sessionId],
+  );
 
   if (!idToken) {
     return <LoginPanel onLoginSuccess={handleLoginSuccess} />;
@@ -237,10 +297,39 @@ export default function App() {
               />
             </section>
             <aside className="flex w-80 flex-col border-l bg-white" aria-label="サイドパネル">
+              {/* Tab switcher */}
+              <div className="flex border-b">
+                <button
+                  type="button"
+                  onClick={() => setSideTab("chat")}
+                  className={`flex-1 px-3 py-2 text-xs font-medium ${
+                    sideTab === "chat"
+                      ? "border-b-2 border-blue-600 text-blue-700"
+                      : "text-gray-500 hover:text-gray-700"
+                  }`}
+                >
+                  チャット
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSideTab("verify")}
+                  className={`flex-1 px-3 py-2 text-xs font-medium ${
+                    sideTab === "verify"
+                      ? "border-b-2 border-indigo-600 text-indigo-700"
+                      : "text-gray-500 hover:text-gray-700"
+                  }`}
+                >
+                  検証
+                  {isVerifying && (
+                    <span className="ml-1 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-indigo-500" />
+                  )}
+                </button>
+              </div>
+
               {aiReasoning && (
                 <details className="border-b" open>
                   <summary className="cursor-pointer bg-indigo-50 px-4 py-2 text-xs font-semibold text-indigo-700 hover:bg-indigo-100">
-                    🧠 AIの解析理由
+                    AIの解析理由
                   </summary>
                   <div className="max-h-60 overflow-y-auto px-4 py-3 text-xs text-gray-700 whitespace-pre-wrap leading-relaxed">
                     {aiReasoning}
@@ -254,7 +343,7 @@ export default function App() {
                   aria-label="AIからの質問"
                 >
                   <p className="mb-2 text-xs font-semibold text-amber-700">
-                    ⚠ AI が確認を求めています
+                    AI が確認を求めています
                   </p>
                   <ul className="space-y-1">
                     {aiQuestions.map((q) => (
@@ -272,34 +361,49 @@ export default function App() {
                   </button>
                 </div>
               )}
-              <ChatPanel
-                sessionId={sessionId}
-                nodeId={nodeId}
-                idToken={idToken}
-                onChatNodeCreated={(newNodeId) => handleChatNodeCreated(sessionId, newNodeId)}
-                selectionContext={
-                  selection
-                    ? [
-                        selection.meshName,
-                        selection.featureId ? `Feature: ${selection.featureId}` : "",
-                        selection.cylinderInfo
-                          ? `穴: Φ${selection.cylinderInfo.diameter} ${selection.cylinderInfo.axis}軸 深さ${selection.cylinderInfo.depth}`
-                          : "",
-                        selection.faceDimensions
-                          ? `面: ${selection.faceDimensions.width}×${selection.faceDimensions.height} 面積${selection.faceDimensions.area}`
-                          : "",
-                        `全体: W:${selection.dimensions.width} H:${selection.dimensions.height} D:${selection.dimensions.depth}`,
-                        selection.normal
-                          ? `面方向: ${selection.normal.x > 0.5 ? "+X" : selection.normal.x < -0.5 ? "-X" : ""}${selection.normal.y > 0.5 ? "+Y" : selection.normal.y < -0.5 ? "-Y" : ""}${selection.normal.z > 0.5 ? "+Z" : selection.normal.z < -0.5 ? "-Z" : "斜面"}`
-                          : "",
-                      ]
-                        .filter(Boolean)
-                        .join(" / ")
-                    : undefined
-                }
-                pipelineComplete={chatPipelineComplete}
-              />
-              <HistoryPanel sessionId={sessionId} onNodeSelect={setNodeId} idToken={idToken} />
+
+              {sideTab === "chat" ? (
+                <>
+                  <ChatPanel
+                    sessionId={sessionId}
+                    nodeId={nodeId}
+                    idToken={idToken}
+                    onChatNodeCreated={(newNodeId) => handleChatNodeCreated(sessionId, newNodeId)}
+                    selectionContext={
+                      selection
+                        ? [
+                            selection.meshName,
+                            selection.featureId ? `Feature: ${selection.featureId}` : "",
+                            selection.cylinderInfo
+                              ? `穴: Φ${selection.cylinderInfo.diameter} ${selection.cylinderInfo.axis}軸 深さ${selection.cylinderInfo.depth}`
+                              : "",
+                            selection.faceDimensions
+                              ? `面: ${selection.faceDimensions.width}×${selection.faceDimensions.height} 面積${selection.faceDimensions.area}`
+                              : "",
+                            `全体: W:${selection.dimensions.width} H:${selection.dimensions.height} D:${selection.dimensions.depth}`,
+                            selection.normal
+                              ? `面方向: ${selection.normal.x > 0.5 ? "+X" : selection.normal.x < -0.5 ? "-X" : ""}${selection.normal.y > 0.5 ? "+Y" : selection.normal.y < -0.5 ? "-Y" : ""}${selection.normal.z > 0.5 ? "+Z" : selection.normal.z < -0.5 ? "-Z" : "斜面"}`
+                              : "",
+                          ]
+                            .filter(Boolean)
+                            .join(" / ")
+                        : undefined
+                    }
+                    pipelineComplete={chatPipelineComplete}
+                  />
+                  <HistoryPanel sessionId={sessionId} onNodeSelect={setNodeId} idToken={idToken} />
+                </>
+              ) : (
+                <VerificationPanel
+                  sessionId={sessionId}
+                  elements={verifyElements}
+                  iterations={verifyIterations}
+                  isVerifying={isVerifying}
+                  currentIteration={currentVerifyIteration}
+                  maxIterations={5}
+                  onSendComment={handleVerifyComment}
+                />
+              )}
             </aside>
           </>
         )}
