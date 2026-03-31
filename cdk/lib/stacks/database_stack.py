@@ -74,3 +74,28 @@ class DatabaseStack(Stack):
             removal_policy=removal,
             time_to_live_attribute="ttl",
         )
+
+        # ---------- drawing_elements table (recursive verification) ----------
+        self.drawing_elements_table = dynamodb.Table(
+            self,
+            "DrawingElementsTable",
+            table_name=f"{project_name}-{env_name}-drawing-elements",
+            partition_key=dynamodb.Attribute(
+                name="drawing_id", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="element_seq", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=removal,
+            time_to_live_attribute="ttl",
+        )
+        self.drawing_elements_table.add_global_secondary_index(
+            index_name="drawing_id-confidence-index",
+            partition_key=dynamodb.Attribute(
+                name="drawing_id", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="confidence", type=dynamodb.AttributeType.NUMBER
+            ),
+        )

@@ -86,6 +86,7 @@ pipeline_stack = PipelineStack(
     artifacts_bucket=network_stack.artifacts_bucket,
     previews_bucket=network_stack.previews_bucket,
     websocket_api=lambda_stack.websocket_api,
+    drawing_elements_table=database_stack.drawing_elements_table,
     enable_fargate=enable_fargate,
     env=aws_env,
 )

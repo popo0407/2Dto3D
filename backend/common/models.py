@@ -22,6 +22,7 @@ class SessionItem(BaseModel):
     status: str = "UPLOADING"
     current_node_id: str = ""
     input_files: list[str] = Field(default_factory=list)
+    pending_verify_comment: str = ""
     created_at: int = Field(default_factory=now_ts)
     updated_at: int = Field(default_factory=now_ts)
     ttl: int = 0
@@ -49,3 +50,30 @@ class NodeItem(BaseModel):
 
     def to_dynamo(self) -> dict:
         return self.model_dump()
+
+
+class DrawingElementItem(BaseModel):
+    drawing_id: str = ""
+    element_seq: str = ""
+    element_type: str = ""
+    feature_label: str = ""
+    dimensions: dict = Field(default_factory=dict)
+    position: dict = Field(default_factory=dict)
+    orientation: str = ""
+    cq_fragment: str = ""
+    confidence: float = 0.0
+    is_verified: bool = False
+    ai_reasoning: str = ""
+    verification_count: int = 0
+    node_id: str = ""
+    ttl: int = 0
+
+    def to_dynamo(self) -> dict:
+        from decimal import Decimal
+
+        d = self.model_dump()
+        # DynamoDB requires Decimal for numeric types
+        d["confidence"] = Decimal(str(d["confidence"]))
+        if not d["ttl"]:
+            d["ttl"] = now_ts() + 90 * 86400
+        return d
