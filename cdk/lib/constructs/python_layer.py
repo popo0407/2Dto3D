@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
+import sys
 
 
 def prepare_common_layer_dir(backend_dir: str) -> str:
@@ -21,6 +23,8 @@ def prepare_common_layer_dir(backend_dir: str) -> str:
         <backend_dir>/.layer_build/
             python/
                 common/   <- copy of backend/common/
+                ezdxf/    <- pip installed
+                ...       <- ezdxf dependencies
 
     This directory is used as the CDK asset source for the Lambda Layer so
     that the runtime finds modules at /opt/python/common.
@@ -39,5 +43,18 @@ def prepare_common_layer_dir(backend_dir: str) -> str:
         shutil.rmtree(layer_dir)
     os.makedirs(python_dir, exist_ok=True)
     shutil.copytree(os.path.join(backend_dir, "common"), dest)
+
+    # Install pip dependencies (ezdxf etc.) into the layer
+    requirements_txt = os.path.join(backend_dir, "requirements.txt")
+    if os.path.isfile(requirements_txt):
+        subprocess.check_call(
+            [
+                sys.executable, "-m", "pip", "install",
+                "-r", requirements_txt,
+                "-t", python_dir,
+                "--quiet",
+                "--no-cache-dir",
+            ]
+        )
 
     return layer_dir
