@@ -12,6 +12,7 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 CONNECTIONS_TABLE = os.environ.get("CONNECTIONS_TABLE", "")
+SESSIONS_TABLE = os.environ.get("SESSIONS_TABLE", "")
 
 dynamodb = boto3.resource("dynamodb")
 
@@ -73,5 +74,25 @@ def default_handler(event: dict, context) -> dict:
                 ExpressionAttributeValues={":sid": session_id},
             )
             logger.info("Connection %s subscribed to session %s", connection_id, session_id)
+
+    elif action == "verifyComment":
+        # Store human comment for the next verification iteration
+        session_id = body.get("session_id", "")
+        comment = body.get("comment", "")
+        if session_id and comment:
+            sessions_table = dynamodb.Table(SESSIONS_TABLE)
+            sessions_table.update_item(
+                Key={"session_id": session_id},
+                UpdateExpression="SET pending_verify_comment = :comment, updated_at = :now",
+                ExpressionAttributeValues={
+                    ":comment": comment,
+                    ":now": int(time.time()),
+                },
+            )
+            logger.info(
+                "Stored verify comment for session %s: %s",
+                session_id,
+                comment[:100],
+            )
 
     return {"statusCode": 200, "body": "OK"}
