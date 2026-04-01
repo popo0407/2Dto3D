@@ -118,6 +118,13 @@ def execute_cadquery(script: str, work_dir: str) -> dict:
         "round": round, "enumerate": enumerate, "zip": zip,
         "map": map, "filter": filter, "sorted": sorted,
         "isinstance": isinstance, "type": type, "bool": bool,
+        # Exception classes required for try-except blocks in generated scripts
+        "Exception": Exception, "BaseException": BaseException,
+        "ValueError": ValueError, "TypeError": TypeError,
+        "RuntimeError": RuntimeError, "IndexError": IndexError,
+        "KeyError": KeyError, "AttributeError": AttributeError,
+        "NotImplementedError": NotImplementedError,
+        "StopIteration": StopIteration, "OverflowError": OverflowError,
     }}
 
     exec(script, namespace)  # noqa: S102 - Script is validated before execution

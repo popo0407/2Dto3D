@@ -151,6 +151,28 @@
 
 ---
 
+## 2026-04-01 CadQueryStep ExitCode 1 バグ修正
+
+### 発生した問題
+Step Functions の `CadQueryStep` で ECS Fargate タスクが ExitCode 1 で終了。
+
+### 根本原因
+
+| 問題 | 原因 |
+|------|------|
+| `NameError: name 'Exception' is not defined` | `runner.py` の `execute_cadquery` が `exec()` に渡す制限 namespace に `Exception` など例外クラスが含まれていなかった。AIが生成した CadQuery スクリプトが `try-except Exception:` で OCC エラーをキャッチしようとして `NameError` で落ちた |
+| `StdFail_NotDone: BRep_API: command not done` | chamfer 操作で OpenCASCADE が形状処理を完了できなかった（スクリプト側のエラー）。上記 `NameError` によって except ブロックが動作しなかったため、エラーがそのまま上位に伝搬した |
+
+### 対処
+`runner.py` の `execute_cadquery` namespace `__builtins__` に以下の例外クラスを追加：
+`Exception`, `BaseException`, `ValueError`, `TypeError`, `RuntimeError`, `IndexError`, `KeyError`, `AttributeError`, `NotImplementedError`, `StopIteration`, `OverflowError`
+
+### 再発防止
+- `exec()` に渡す制限 namespace を構築する際は、スクリプトが使用する可能性のある組み込みを網羅する。特に `try-except` ブロックに必要な例外クラスを忘れずに含める
+- 新しい組み込みが必要になった場合は namespace を拡張し、セキュリティ上問題ないか確認する（`os`, `subprocess` 等の危険モジュールは引き続き除外）
+
+---
+
 ## 2026-03 DynamoDB float 型エラー修正
 
 ### 実施内容
@@ -395,3 +417,32 @@ nodes_table.update_item(
 - 非同期処理の「間」（検証完了→最終生成）にはフロントエンドで状態遷移を明示する。サイレントな待機状態を作らない
 - ユーザーアクションに対するフィードバックは即座に表示する（送信履歴・選択ハイライトなど）
 - 単一メッシュのGLBで面レベル選択を行うには、BufferGeometryのfaceIndexから共面三角形を検出し、オーバーレイメッシュでハイライトするアプローチが有効
+
+---
+
+## 2026-04 Bedrock Lambda タイムアウト修正
+
+### 実施日: 2026-04-01
+
+### 概要
+`2dto3d-dev-ai_analyze_handler` Lambda が Duration: 300000ms（5分）でタイムアウトする問題を修正。
+
+### 根本原因
+| 原因 | 詳細 |
+|------|------|
+| `invoke_model` の同期ブロッキング | boto3 の `invoke_model` は Bedrock がレスポンス全体を生成し終わるまで TCP コネクションを保持したまま待機する。8192 max_tokens + 大容量画像の組み合わせでは Claude の生成完了が 5 分超になる場合がある |
+| Lambda タイムアウトが 300 秒（5 分）に設定されていた | Bedrock 推論時間が Lambda 上限に達してそのまま強制終了 |
+
+### 対処
+
+| 対処 | ファイル |
+|------|----------|
+| `invoke_model` → `invoke_model_with_response_stream` に変更。chunk イベントを順次受信するためコネクションがアクティブに維持され、Lambda がアイドル待機にならない | `backend/common/bedrock_client.py` |
+| Bedrock 呼び出し Lambda のタイムアウトを 300 秒 → **900 秒（Lambda 上限）** に引き上げ | `cdk/lib/stacks/pipeline_stack.py` |
+| 変更対象は Bedrock を呼ぶ全3関数: `ai_analyze_handler`・`dimension_extract_handler`・`dimension_verify_handler` | 同上 |
+
+### 改善策・再発防止
+- Bedrock の `invoke_model`（同期）は応答全体の生成を待つため、**長いプロンプト・多 max_tokens では Lambda タイムアウトの直接原因になる**。`invoke_model_with_response_stream` を標準として使用する
+- streaming API のレスポンス組み立て: Claude の Messages API では `content_block_delta` / `text_delta` イベントのみテキストを含む。他のイベントタイプ（`message_start`, `message_stop` 等）は無視してよい
+- Lambda から Bedrock を呼ぶ場合、タイムアウトは **900 秒（Lambda 最大値）** を設定する
+- 中長期的には Step Functions native `BedrockInvokeModel` タスクへの移行が理想（Lambda 不要・タイムアウト制約なし・コスト削減）
