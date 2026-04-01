@@ -62,6 +62,8 @@ export default function App() {
   const [verifyIterations, setVerifyIterations] = useState<VerificationIteration[]>([]);
   const [isVerifying, setIsVerifying] = useState(false);
   const [currentVerifyIteration, setCurrentVerifyIteration] = useState(0);
+  const [highlightedElement, setHighlightedElement] = useState<string | null>(null);
+  const [isBuildingFinal, setIsBuildingFinal] = useState(false);
 
   // WebSocket ref（セッションをまたいで保持）
   const wsRef = useRef<WebSocket | null>(null);
@@ -99,7 +101,11 @@ export default function App() {
               const elems = msg.elements ?? [];
               setVerifyElements(elems);
               setCurrentVerifyIteration(msg.iteration_count ?? 0);
-              setIsVerifying(!msg.all_verified);
+              const allVerified = !!msg.all_verified;
+              setIsVerifying(!allVerified);
+              if (allVerified) {
+                setIsBuildingFinal(true);
+              }
               setVerifyIterations((prev) => [
                 ...prev,
                 {
@@ -114,10 +120,12 @@ export default function App() {
           } else if (msg.type === "PROCESSING_COMPLETE" && msg.node_id && msg.gltf_url) {
               setProcessingProgress(100);
               setIsVerifying(false);
+              setIsBuildingFinal(false);
               ws.close();
               onComplete(msg.node_id, msg.gltf_url, msg.ai_reasoning);
             } else if (msg.type === "PROCESSING_FAILED") {
               setIsVerifying(false);
+              setIsBuildingFinal(false);
               ws.close();
               onError(msg.error ?? "処理に失敗しました");
             }
@@ -184,6 +192,8 @@ export default function App() {
     setVerifyIterations([]);
     setIsVerifying(false);
     setCurrentVerifyIteration(0);
+    setHighlightedElement(null);
+    setIsBuildingFinal(false);
     setSideTab("chat");
     setView("upload");
   };
@@ -301,9 +311,25 @@ export default function App() {
                 <div className="flex flex-1 flex-col">
                   <div className="flex items-center gap-2 border-b bg-indigo-50 px-4 py-2">
                     <span className="h-2 w-2 animate-pulse rounded-full bg-indigo-500" />
-                    <span className="text-xs font-semibold text-indigo-700">中間プレビュー</span>
+                    <span className="text-xs font-semibold text-indigo-700">
+                      {isBuildingFinal ? "最終3Dモデル生成中..." : "中間プレビュー"}
+                    </span>
+                    {isBuildingFinal && (
+                      <span className="ml-auto text-[10px] text-indigo-500">検証完了 → CadQuery構築中</span>
+                    )}
                   </div>
-                  <ElementPreview elements={verifyElements} className="flex-1 w-full bg-gray-900" />
+                  <div className="relative flex-1">
+                    <ElementPreview elements={verifyElements} className="h-full w-full bg-gray-900" highlightedElement={highlightedElement} />
+                    {isBuildingFinal && (
+                      <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/30">
+                        <div className="flex flex-col items-center gap-2 rounded-lg bg-white/90 px-6 py-4 shadow-lg">
+                          <div className="h-8 w-8 animate-spin rounded-full border-3 border-indigo-200 border-t-indigo-600" />
+                          <p className="text-sm font-semibold text-indigo-700">最終3Dモデルを生成中</p>
+                          <p className="text-xs text-gray-500">検証済みデータを元にCadQueryで構築しています</p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </div>
               ) : (
                 <div className="flex flex-1 items-center justify-center bg-gray-100">
@@ -423,6 +449,9 @@ export default function App() {
                   currentIteration={currentVerifyIteration}
                   maxIterations={5}
                   onSendComment={handleVerifyComment}
+                  isBuildingFinal={isBuildingFinal}
+                  highlightedElement={highlightedElement}
+                  onElementClick={setHighlightedElement}
                 />
               )}
             </aside>
