@@ -77,16 +77,22 @@ class BedrockClient:
             }
         )
 
-        logger.info("Invoking Bedrock model %s", MODEL_ID)
-        response = self._client.invoke_model(
+        logger.info("Invoking Bedrock model %s (streaming)", MODEL_ID)
+        response = self._client.invoke_model_with_response_stream(
             modelId=MODEL_ID,
             body=body,
             contentType="application/json",
             accept="application/json",
         )
 
-        result = json.loads(response["body"].read())
-        return result["content"][0]["text"]
+        full_text = ""
+        for event in response["body"]:
+            chunk = json.loads(event["chunk"]["bytes"])
+            if chunk.get("type") == "content_block_delta":
+                delta = chunk.get("delta", {})
+                if delta.get("type") == "text_delta":
+                    full_text += delta.get("text", "")
+        return full_text
 
 
 def get_bedrock_client(region: str = "ap-northeast-1") -> BedrockClient:

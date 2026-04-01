@@ -126,20 +126,21 @@ class PipelineStack(Stack):
         parse_fn = pipeline_lambda("parse_handler", timeout_seconds=120, memory_mb=1024)
 
         # Step 2: AI Analyze handler
+        # タイムアウト 900s（Lambda 上限）: Bedrock streaming で長大な推論に対応
         ai_analyze_fn = pipeline_lambda(
-            "ai_analyze_handler", timeout_seconds=300, memory_mb=1024
+            "ai_analyze_handler", timeout_seconds=900, memory_mb=1024
         )
         ai_analyze_fn.add_to_role_policy(bedrock_policy)
 
         # Step 2.5: Dimension Extract handler
         dimension_extract_fn = pipeline_lambda(
-            "dimension_extract_handler", timeout_seconds=300, memory_mb=1024
+            "dimension_extract_handler", timeout_seconds=900, memory_mb=1024
         )
         dimension_extract_fn.add_to_role_policy(bedrock_policy)
 
         # Step 2.6: Dimension Verify handler
         dimension_verify_fn = pipeline_lambda(
-            "dimension_verify_handler", timeout_seconds=300, memory_mb=1024
+            "dimension_verify_handler", timeout_seconds=900, memory_mb=1024
         )
         dimension_verify_fn.add_to_role_policy(bedrock_policy)
 
