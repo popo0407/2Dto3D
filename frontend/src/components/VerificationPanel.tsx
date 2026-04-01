@@ -31,6 +31,14 @@ interface VerificationPanelProps {
   currentIteration: number;
   maxIterations: number;
   onSendComment: (comment: string) => void;
+  /** Whether the final 3D model is being generated after verification */
+  isBuildingFinal?: boolean;
+  /** Currently highlighted element seq */
+  highlightedElement?: string | null;
+  /** Callback when an element is clicked in the list */
+  onElementClick?: (elementSeq: string | null) => void;
+  /** Callback when an element is double-clicked in the list (insert into comment) */
+  onElementDoubleClick?: (elementLabel: string) => void;
 }
 
 /* ---------- Confidence helpers ---------- */
@@ -119,7 +127,7 @@ function buildCSGMesh(elements: VerificationElement[]): THREE.BufferGeometry | n
   return result.geometry;
 }
 
-function CSGPreview({ elements }: { elements: VerificationElement[] }) {
+function CSGPreview({ elements, highlightedElement }: { elements: VerificationElement[]; highlightedElement?: string | null }) {
   const geometry = useMemo(() => buildCSGMesh(elements), [elements]);
 
   const minConfidence = useMemo(() => {
@@ -127,11 +135,16 @@ function CSGPreview({ elements }: { elements: VerificationElement[] }) {
     return Math.min(...elements.map((e) => e.confidence));
   }, [elements]);
 
-  const meshColor = minConfidence >= 0.85
-    ? "#6b9080"
-    : minConfidence >= 0.6
-      ? "#a68a64"
-      : "#a06060";
+  const baseElement = elements.find((e) => e.element_type === "box");
+  const isBaseHighlighted = highlightedElement && baseElement?.element_seq === highlightedElement;
+
+  const meshColor = isBaseHighlighted
+    ? "#818cf8"
+    : minConfidence >= 0.85
+      ? "#6b9080"
+      : minConfidence >= 0.6
+        ? "#a68a64"
+        : "#a06060";
 
   if (!geometry) {
     return (
@@ -153,18 +166,21 @@ function CSGPreview({ elements }: { elements: VerificationElement[] }) {
   );
 }
 
-function HoleMarkers({ elements }: { elements: VerificationElement[] }) {
+function HoleMarkers({ elements, highlightedElement }: { elements: VerificationElement[]; highlightedElement?: string | null }) {
   const holes = elements.filter((e) => e.element_type === "hole");
   return (
     <>
       {holes.map((hole) => {
         const diameter = (hole.dimensions?.diameter as number) ?? 6;
         const depth = (hole.dimensions?.depth as number) ?? 10;
-        const color = hole.confidence >= 0.85
-          ? "#22c55e"
-          : hole.confidence >= 0.6
-            ? "#eab308"
-            : "#ef4444";
+        const isHighlighted = highlightedElement === hole.element_seq;
+        const color = isHighlighted
+          ? "#818cf8"
+          : hole.confidence >= 0.85
+            ? "#22c55e"
+            : hole.confidence >= 0.6
+              ? "#eab308"
+              : "#ef4444";
 
         return (
           <mesh
@@ -177,7 +193,7 @@ function HoleMarkers({ elements }: { elements: VerificationElement[] }) {
             rotation={orientationToEuler(hole.orientation)}
           >
             <cylinderGeometry args={[diameter / 2 + 0.3, diameter / 2 + 0.3, depth + 1, 32]} />
-            <meshBasicMaterial color={color} wireframe transparent opacity={0.4} />
+            <meshBasicMaterial color={color} wireframe transparent opacity={isHighlighted ? 0.8 : 0.4} />
           </mesh>
         );
       })}
@@ -185,7 +201,7 @@ function HoleMarkers({ elements }: { elements: VerificationElement[] }) {
   );
 }
 
-export function ElementPreview({ elements, className }: { elements: VerificationElement[]; className?: string }) {
+export function ElementPreview({ elements, className, highlightedElement }: { elements: VerificationElement[]; className?: string; highlightedElement?: string | null }) {
   const base = elements.find((e) => e.element_type === "box");
   const maxDim = base
     ? Math.max(
@@ -201,8 +217,8 @@ export function ElementPreview({ elements, className }: { elements: Verification
       <Canvas camera={{ position: [camDist, camDist * 0.7, camDist], fov: 45 }}>
         <ambientLight intensity={0.5} />
         <directionalLight position={[camDist, camDist, camDist * 0.5]} intensity={0.8} />
-        <CSGPreview elements={elements} />
-        <HoleMarkers elements={elements} />
+        <CSGPreview elements={elements} highlightedElement={highlightedElement} />
+        <HoleMarkers elements={elements} highlightedElement={highlightedElement} />
         <gridHelper args={[maxDim * 3, 20, "#444", "#333"]} />
         <OrbitControls enableDamping />
       </Canvas>
@@ -220,16 +236,34 @@ export function VerificationPanel({
   currentIteration,
   maxIterations,
   onSendComment,
+  isBuildingFinal,
+  highlightedElement,
+  onElementClick,
+  onElementDoubleClick,
 }: VerificationPanelProps) {
   const [comment, setComment] = useState("");
+  const [commentHistory, setCommentHistory] = useState<{ text: string; timestamp: number }[]>([]);
   const [expandedIteration, setExpandedIteration] = useState<number | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const handleSend = useCallback(() => {
     if (!comment.trim() || !sessionId) return;
-    onSendComment(comment.trim());
+    const trimmed = comment.trim();
+    setCommentHistory((prev) => [...prev, { text: trimmed, timestamp: Date.now() }]);
+    onSendComment(trimmed);
     setComment("");
   }, [comment, sessionId, onSendComment]);
+
+  const handleElementDoubleClick = useCallback(
+    (label: string) => {
+      setComment((prev) => {
+        const prefix = prev.trim() ? `${prev} ` : "";
+        return `${prefix}[${label}] `;
+      });
+      onElementDoubleClick?.(label);
+    },
+    [onElementDoubleClick],
+  );
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -282,7 +316,22 @@ export function VerificationPanel({
             </thead>
             <tbody className="divide-y">
               {elements.map((elem) => (
-                <tr key={elem.element_seq} className="hover:bg-gray-50">
+                <tr
+                  key={elem.element_seq}
+                  className={`cursor-pointer transition-colors ${
+                    highlightedElement === elem.element_seq
+                      ? "bg-indigo-100 ring-1 ring-inset ring-indigo-400"
+                      : "hover:bg-gray-50"
+                  }`}
+                  onClick={() => onElementClick?.(highlightedElement === elem.element_seq ? null : elem.element_seq)}
+                  onDoubleClick={() => handleElementDoubleClick(elem.feature_label || elem.element_seq)}
+                  role="button"
+                  tabIndex={0}
+                  aria-selected={highlightedElement === elem.element_seq}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") onElementClick?.(highlightedElement === elem.element_seq ? null : elem.element_seq);
+                  }}
+                >
                   <td className="px-3 py-1.5">
                     <div className="font-medium text-gray-900">
                       {elem.feature_label || elem.element_seq}
@@ -359,6 +408,32 @@ export function VerificationPanel({
         )}
         <div ref={bottomRef} />
       </div>
+
+      {/* Building final 3D model indicator (① fix) */}
+      {isBuildingFinal && (
+        <div className="flex items-center gap-2 border-t bg-blue-50 px-4 py-3" role="status" aria-label="3Dモデル生成中">
+          <div className="h-4 w-4 animate-spin rounded-full border-2 border-blue-300 border-t-blue-600" />
+          <div className="flex-1">
+            <p className="text-xs font-semibold text-blue-700">最終3Dモデルを生成中...</p>
+            <p className="text-[10px] text-blue-500">検証が完了しました。CadQueryで3Dモデルを構築しています</p>
+          </div>
+        </div>
+      )}
+
+      {/* Comment history (② fix) */}
+      {commentHistory.length > 0 && (
+        <div className="max-h-28 overflow-y-auto border-t bg-gray-50 px-3 py-2">
+          <p className="mb-1 text-[10px] font-semibold text-gray-400">送信済みコメント</p>
+          <div className="space-y-1">
+            {commentHistory.map((ch, i) => (
+              <div key={i} className="flex items-start gap-1.5 text-[10px]">
+                <span className="shrink-0 text-gray-300">{new Date(ch.timestamp).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })}</span>
+                <span className="text-gray-600">{ch.text}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Comment input */}
       <div className="border-t bg-white p-3">
