@@ -37,13 +37,14 @@ def _seed_node(dynamo_resource, node_id="node-001", session_id="sess-001"):
 
 
 def _seed_elements(dynamo_resource, session_id="sess-001"):
-    """Seed a box (high-conf) and a hole (low-conf) element."""
+    """Seed a box (high-conf) and a tapped_hole (low-conf) element."""
     table = dynamo_resource.Table("test-drawing-elements")
     table.put_item(Item={
         "drawing_id": session_id,
         "element_seq": "0001",
         "element_type": "box",
         "feature_label": "Feature-001: base_body",
+        "feature_spec": {},
         "dimensions": {"width": Decimal("100"), "height": Decimal("60"), "depth": Decimal("20")},
         "position": {"x": Decimal("0"), "y": Decimal("0"), "z": Decimal("0")},
         "orientation": "XY",
@@ -58,15 +59,24 @@ def _seed_elements(dynamo_resource, session_id="sess-001"):
     table.put_item(Item={
         "drawing_id": session_id,
         "element_seq": "0002",
-        "element_type": "hole",
-        "feature_label": "Hole-001: Φ6 through +Z",
-        "dimensions": {"diameter": Decimal("6"), "depth": Decimal("20")},
-        "position": {"x": Decimal("30"), "y": Decimal("15"), "z": Decimal("0")},
+        "element_type": "tapped_hole",
+        "feature_label": "Hole-M6-01: M6 タップ穴 +Z",
+        "feature_spec": {
+            "hole_type": "tapped",
+            "designation": "M6",
+            "pitch": Decimal("1.0"),
+            "tap_depth": Decimal("12.0"),
+            "drill_diameter": Decimal("5.0"),
+            "through": False,
+            "standard": "JIS",
+        },
+        "dimensions": {"diameter": Decimal("5"), "depth": Decimal("12")},
+        "position": {"x": Decimal("20"), "y": Decimal("10"), "z": Decimal("0")},
         "orientation": "+Z",
-        "cq_fragment": 'result = result.faces(">Z").workplane().pushPoints([(30,15)]).hole(6)',
+        "cq_fragment": 'result = result.faces(">Z").workplane().pushPoints([(20,10)]).hole(5.0, 12.0)',
         "confidence": Decimal("0.70"),
         "is_verified": False,
-        "ai_reasoning": "Position uncertain",
+        "ai_reasoning": "M6 annotation found, position uncertain",
         "verification_count": 0,
         "node_id": "node-001",
         "ttl": 9999999,
@@ -76,14 +86,23 @@ def _seed_elements(dynamo_resource, session_id="sess-001"):
 MOCK_VERIFY_RESPONSE = json.dumps([
     {
         "element_seq": "0002",
-        "element_type": "hole",
-        "feature_label": "Hole-001: Φ6 through +Z",
-        "dimensions": {"diameter": 6.0, "depth": 20.0},
-        "position": {"x": 30.0, "y": 15.0, "z": 0.0},
+        "element_type": "tapped_hole",
+        "feature_label": "Hole-M6-01: M6 タップ穴 +Z",
+        "feature_spec": {
+            "hole_type": "tapped",
+            "designation": "M6",
+            "pitch": 1.0,
+            "tap_depth": 12.0,
+            "drill_diameter": 5.0,
+            "through": False,
+            "standard": "JIS",
+        },
+        "dimensions": {"diameter": 5.0, "depth": 12.0},
+        "position": {"x": 20.0, "y": 10.0, "z": 0.0},
         "orientation": "+Z",
-        "cq_fragment": 'result = result.faces(">Z").workplane().pushPoints([(30,15)]).hole(6)',
+        "cq_fragment": 'result = result.faces(">Z").workplane().pushPoints([(20,10)]).hole(5.0, 12.0)',
         "confidence": 0.92,
-        "ai_reasoning": "Confirmed via side-view cross-hatching",
+        "ai_reasoning": "M6 (JIS B 0205) 確認。下穴径5.0mm、タップ深さ12mm",
     }
 ])
 
@@ -132,6 +151,9 @@ def test_verify_updates_confidence(dynamodb_tables, s3_buckets):
     assert float(item["confidence"]) == pytest.approx(0.92)
     assert item["is_verified"] is True
     assert item["verification_count"] == 1
+    # feature_spec が更新されていること
+    assert item["feature_spec"]["designation"] == "M6"
+    assert float(item["feature_spec"]["pitch"]) == 1.0
 
 
 @mock_aws
@@ -147,6 +169,7 @@ def test_all_verified_skips_ai(dynamodb_tables, s3_buckets):
         "element_seq": "0001",
         "element_type": "box",
         "feature_label": "Feature-001: base",
+        "feature_spec": {},
         "dimensions": {"width": Decimal("50")},
         "position": {"x": Decimal("0")},
         "orientation": "XY",

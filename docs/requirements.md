@@ -573,6 +573,80 @@ cdk deploy --all --context environment=prod --context useMockAI=false --context 
 | `user_id` | String | Cognito sub |
 | `ttl` | Number | TTL（接続切れ後自動削除） |
 
+#### drawing_elements テーブル（`2dto3d-{env}-drawing-elements`）
+
+各図面を個々の設計要素（フィーチャー）単位に分解して保存する。  
+AIによる再検証ループおよびユーザー検証の対象単位となる。
+
+| 属性 | 型 | 説明 |
+|---|---|---|
+| `drawing_id` (PK) | String | 対象セッションID |
+| `element_seq` (SK) | String | 同一図面内の順序番号（例: "0001"） |
+| `element_type` | String | フィーチャー種別（下記参照） |
+| `feature_label` | String | AIが付与した識別名（例: "Hole-M6-01"） |
+| `feature_spec` | Map | **element_type ごとの詳細パラメータ**（下記スキーマ参照） |
+| `dimensions` | Map | 後方互換・概要寸法（width/height/depth/diameter/radius） |
+| `position` | Map | 3D空間での位置座標 `{x, y, z}` |
+| `orientation` | String | フィーチャーの向き（例: "+Z", "-Y"） |
+| `cq_fragment` | String | この要素を生成する CadQuery コード断片 |
+| `confidence` | Number | AI 推論の信頼度スコア (0.0〜1.0)、GSI ソートキー |
+| `is_verified` | Boolean | 信頼度が閾値（0.85）以上かどうか |
+| `ai_reasoning` | String | AI がこの要素を推定した根拠テキスト |
+| `verification_count` | Number | 人間による再検証回数 |
+| `node_id` | String | この要素が属するノードID |
+| `ttl` | Number | DynamoDB TTL（90日） |
+
+**GSI**: `drawing_id-confidence-index`（drawing_id で絞り込み、confidence 昇順で低確度を最優先に取得）
+
+##### element_type の有効値
+
+| 値 | 説明 |
+|---|---|
+| `box` | 基本直方体（ベース形状） |
+| `hole_through` | 貫通穴 |
+| `hole_blind` | 止め穴（ブラインドホール） |
+| `tapped_hole` | ネジ穴（タップ穴） |
+| `fillet` | R 面取り |
+| `chamfer` | C 面取り |
+| `slot` | 長穴 |
+| `pocket` | ポケット加工 |
+| `boss` | ボス（突起） |
+| `rib` | リブ |
+| `other` | 上記以外 |
+
+##### feature_spec スキーマ（element_type ごと）
+
+```json
+// hole_through（貫通穴）
+{ "hole_type": "through", "diameter": 6.0 }
+
+// hole_blind（止め穴）
+{ "hole_type": "blind", "diameter": 6.0, "depth": 10.0 }
+
+// tapped_hole（ネジ穴・タップ穴）
+{
+  "hole_type": "tapped",
+  "designation": "M6",        // JIS/ISO ネジ呼び径
+  "pitch": 1.0,               // ネジピッチ (mm)
+  "tap_depth": 15.0,          // タップ深さ (mm)
+  "drill_diameter": 5.0,      // 下穴径 (mm)
+  "through": false,           // 貫通タップの場合 true
+  "standard": "JIS"           // "JIS" | "ISO" | "UNC" | "UNF" | "other"
+}
+
+// fillet（R 面取り）
+{ "radius": 2.0, "edge_selector": "|Z", "quantity": 4 }
+
+// chamfer（C 面取り）
+{ "distance": 1.0, "angle": 45.0, "edge_selector": "|Z", "quantity": 2 }
+
+// slot（長穴）
+{ "width": 6.0, "length": 20.0, "depth": null, "orientation": "+Z" }
+
+// pocket（ポケット）
+{ "width": 30.0, "height": 20.0, "depth": 5.0 }
+```
+
 ---
 
 ## 10. API設計
