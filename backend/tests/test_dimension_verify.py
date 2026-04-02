@@ -9,6 +9,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 import boto3
 from moto import mock_aws
+from common.bedrock_client import InvokeResult
 
 
 def _seed_session(dynamo_resource, session_id="sess-001", comment=""):
@@ -121,9 +122,10 @@ def test_verify_updates_confidence(dynamodb_tables, s3_buckets):
     _seed_elements(dynamodb_tables)
 
     with patch("common.bedrock_client.get_bedrock_client") as mock_bedrock, \
-         patch("common.ws_notify.send_progress"):
+         patch("common.ws_notify.send_progress"), \
+         patch("common.ws_notify.send_token_usage"):
         mock_client = MagicMock()
-        mock_client.invoke_multimodal.return_value = MOCK_VERIFY_RESPONSE
+        mock_client.invoke_multimodal.return_value = InvokeResult(text=MOCK_VERIFY_RESPONSE, input_tokens=100, output_tokens=200)
         mock_bedrock.return_value = mock_client
 
         import backend.functions.dimension_verify_handler.index as module
@@ -213,9 +215,10 @@ def test_human_comment_is_read_and_cleared(dynamodb_tables, s3_buckets):
     _seed_elements(dynamodb_tables)
 
     with patch("common.bedrock_client.get_bedrock_client") as mock_bedrock, \
-         patch("common.ws_notify.send_progress"):
+         patch("common.ws_notify.send_progress"), \
+         patch("common.ws_notify.send_token_usage"):
         mock_client = MagicMock()
-        mock_client.invoke_multimodal.return_value = MOCK_VERIFY_RESPONSE
+        mock_client.invoke_multimodal.return_value = InvokeResult(text=MOCK_VERIFY_RESPONSE, input_tokens=100, output_tokens=200)
         mock_bedrock.return_value = mock_client
 
         import backend.functions.dimension_verify_handler.index as module
@@ -253,7 +256,7 @@ def test_final_assembly(dynamodb_tables, s3_buckets):
          patch("common.ws_notify.send_progress"), \
          patch("common.script_validator.validate_cadquery_script"):
         mock_client = MagicMock()
-        mock_client.invoke_multimodal.return_value = MOCK_FINAL_ASSEMBLY_RESPONSE
+        mock_client.invoke_multimodal.return_value = InvokeResult(text=MOCK_FINAL_ASSEMBLY_RESPONSE, input_tokens=100, output_tokens=200)
         mock_bedrock.return_value = mock_client
 
         import backend.functions.dimension_verify_handler.index as module

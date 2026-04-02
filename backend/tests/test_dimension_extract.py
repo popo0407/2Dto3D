@@ -9,6 +9,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 import boto3
 from moto import mock_aws
+from common.bedrock_client import InvokeResult
 
 
 MOCK_AI_RESPONSE = json.dumps([
@@ -117,9 +118,10 @@ def test_extract_stores_elements(dynamodb_tables, s3_buckets):
     })
 
     with patch("common.bedrock_client.get_bedrock_client") as mock_bedrock, \
-         patch("common.ws_notify.send_progress"):
+         patch("common.ws_notify.send_progress"), \
+         patch("common.ws_notify.send_token_usage"):
         mock_client = MagicMock()
-        mock_client.invoke_multimodal.return_value = MOCK_AI_RESPONSE
+        mock_client.invoke_multimodal.return_value = InvokeResult(text=MOCK_AI_RESPONSE, input_tokens=100, output_tokens=200)
         mock_bedrock.return_value = mock_client
 
         import backend.functions.dimension_extract_handler.index as module
@@ -182,9 +184,10 @@ def test_extract_parses_json_in_markdown(dynamodb_tables, s3_buckets):
     markdown_response = f"Here is the result:\n```json\n{MOCK_AI_RESPONSE}\n```\n"
 
     with patch("common.bedrock_client.get_bedrock_client") as mock_bedrock, \
-         patch("common.ws_notify.send_progress"):
+         patch("common.ws_notify.send_progress"), \
+         patch("common.ws_notify.send_token_usage"):
         mock_client = MagicMock()
-        mock_client.invoke_multimodal.return_value = markdown_response
+        mock_client.invoke_multimodal.return_value = InvokeResult(text=markdown_response, input_tokens=100, output_tokens=200)
         mock_bedrock.return_value = mock_client
 
         import backend.functions.dimension_extract_handler.index as module
