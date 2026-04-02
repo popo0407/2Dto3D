@@ -445,4 +445,42 @@ nodes_table.update_item(
 - Bedrock の `invoke_model`（同期）は応答全体の生成を待つため、**長いプロンプト・多 max_tokens では Lambda タイムアウトの直接原因になる**。`invoke_model_with_response_stream` を標準として使用する
 - streaming API のレスポンス組み立て: Claude の Messages API では `content_block_delta` / `text_delta` イベントのみテキストを含む。他のイベントタイプ（`message_start`, `message_stop` 等）は無視してよい
 - Lambda から Bedrock を呼ぶ場合、タイムアウトは **900 秒（Lambda 最大値）** を設定する
-- 中長期的には Step Functions native `BedrockInvokeModel` タスクへの移行が理想（Lambda 不要・タイムアウト制約なし・コスト削減）
+- 中長期的には Step Functions native `BedrockInvokeModel` タスクへの移行が理想（Lambda 不要・タイムアウト制約な
+
+---
+
+## 2026-04 UI改修（中間プレビュー・トークン表示・スクロール・チャット統合）
+
+### 実施日: 2026-04-02
+
+### 実施内容
+4件のUX課題を修正・実装。
+
+### 発生した問題と対処
+
+| 問題 | 原因 | 対処 |
+|------|------|------|
+| チャット再実行後に中間プレビューが表示されない | `handleChatNodeCreated` が `gltfUrl` をクリアせず、古いモデルURLが残り `Viewer3D` が優先表示された | `handleChatNodeCreated` 冒頭で `setGltfUrl("")`・`setVerifyElements([])`・`setVerifyIterations([])` を追加 |
+| 累計トークン使用量がフロントエンドで確認できない | `BedrockClient` がトークン数を取得・送信していなかった | `invoke_multimodal` の戻り値を `InvokeResult(text, input_tokens, output_tokens)` に変更。各Lambdaで `send_token_usage` を呼び出してWS通知。フロントでは `TOKEN_USAGE` メッセージを受信して累計表示 |
+| 検証タブのコンテンツがスクロールできない | `VerificationPanel` の外側 `div` に `min-h-0` が不足しており flex コンテナが高さを超えてもスクロールが有効にならなかった | `flex flex-1 flex-col` → `flex min-h-0 flex-1 flex-col overflow-hidden` に修正 |
+| 検証中用・検証後修正用チャットが別タブで不便 | 右サイドパネルがタブ切替式のため毎回手動切替が必要だった | タブを廃止。`ChatPanel` に `verifyMode` / `onVerifyComment` / `isBuildingFinal` プロパティを追加し、検証中はWS経由コメント送信・完了後はAPI経由モデル修正をシームレス切替。`VerificationPanel` から独立したコメント入力を削除 |
+
+### 変更ファイル
+| ファイル | 変更内容 |
+|---------|---------|
+| `backend/common/bedrock_client.py` | `InvokeResult` dataclass 追加、ストリームからトークン数を抽出 |
+| `backend/common/ws_notify.py` | `send_token_usage()` 関数追加 |
+| `backend/functions/ai_analyze_handler/index.py` | `send_token_usage` 呼び出し追加 |
+| `backend/functions/dimension_extract_handler/index.py` | 同上 |
+| `backend/functions/dimension_verify_handler/index.py` | `_verify_elements`・`_final_assembly` のreturnにトークン数を追加 |
+| `backend/functions/chat_handler/index.py` | レスポンスに `input_tokens`・`output_tokens` を含める |
+| `cdk/lib/stacks/lambda_stack.py` | `bedrock:InvokeModelWithResponseStream` 権限追加 |
+| `cdk/lib/stacks/pipeline_stack.py` | 同上 |
+| `frontend/src/App.tsx` | タブ廃止・token state追加・ヘッダー表示・統合レイアウト |
+| `frontend/src/components/ChatPanel.tsx` | verifyMode対応・トークン通知callback追加 |
+| `frontend/src/components/VerificationPanel.tsx` | コメント入力削除・スクロール修正 |
+
+### 改善策・再発防止
+- `flex-1` だけでは flex 子要素の高さは親を超えてスクロールを効かせられない。`min-h-0` を組み合わせることで flex コンテナの高さ制約が正しく伝播する
+- 状態遷移時にリセットすべき状態を設計段階で洗い出す（今回は `gltfUrl`・`verifyElements`・`verifyIterations` のリセット漏れ）
+- ストリーミング API のメタデータ（トークン数）は `message_start` イベント (`input_tokens`) と `message_delta` イベント (`output_tokens`) から取得できるし・コスト削減）
