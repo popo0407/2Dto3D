@@ -62,3 +62,46 @@ def send_progress(session_id: str, step: str, progress: int, message: str) -> No
 
     except Exception as exc:
         logger.warning("send_progress failed for session %s: %s", session_id, exc)
+
+
+def send_token_usage(session_id: str, step: str, input_tokens: int, output_tokens: int) -> None:
+    """Broadcast a TOKEN_USAGE message to all active WebSocket connections for a session."""
+    api_id = os.environ.get("WEBSOCKET_API_ID", "")
+    connections_table_name = os.environ.get("CONNECTIONS_TABLE", "")
+    region = os.environ.get("AWS_REGION", "ap-northeast-1")
+    stage = os.environ.get("ENV_NAME", "dev")
+
+    if not api_id or not connections_table_name:
+        return
+
+    try:
+        dynamodb = boto3.resource("dynamodb")
+        table = dynamodb.Table(connections_table_name)
+        resp = table.scan(FilterExpression=Attr("session_id").eq(session_id))
+        connections = resp.get("Items", [])
+
+        if not connections:
+            return
+
+        endpoint_url = f"https://{api_id}.execute-api.{region}.amazonaws.com/{stage}"
+        apigw = boto3.client("apigatewaymanagementapi", endpoint_url=endpoint_url)
+
+        payload = json.dumps({
+            "type": "TOKEN_USAGE",
+            "session_id": session_id,
+            "step": step,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        }).encode()
+
+        for conn in connections:
+            connection_id = conn["connection_id"]
+            try:
+                apigw.post_to_connection(ConnectionId=connection_id, Data=payload)
+            except apigw.exceptions.GoneException:
+                table.delete_item(Key={"connection_id": connection_id})
+            except Exception as exc:
+                logger.warning("Failed to push token usage to connection %s: %s", connection_id, exc)
+
+    except Exception as exc:
+        logger.warning("send_token_usage failed for session %s: %s", session_id, exc)

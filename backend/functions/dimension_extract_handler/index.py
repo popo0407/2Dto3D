@@ -12,7 +12,7 @@ import time
 from decimal import Decimal
 
 import boto3
-from common.ws_notify import send_progress
+from common.ws_notify import send_progress, send_token_usage
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -174,14 +174,15 @@ def lambda_handler(event: dict, context) -> dict:
     from common.bedrock_client import get_bedrock_client
 
     client = get_bedrock_client(region=BEDROCK_REGION)
-    raw_response = client.invoke_multimodal(
+    invoke_result = client.invoke_multimodal(
         prompt=prompt,
         image_bytes=image_bytes,
         image_media_type=image_media_type,
     )
+    send_token_usage(session_id, "EXTRACTING_DIMENSIONS", invoke_result.input_tokens, invoke_result.output_tokens)
 
     # Parse element list from response
-    elements = _parse_elements(raw_response)
+    elements = _parse_elements(invoke_result.text)
 
     # Store elements in DynamoDB
     elements_table = dynamodb.Table(DRAWING_ELEMENTS_TABLE)

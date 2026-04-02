@@ -14,7 +14,7 @@ from decimal import Decimal
 
 import boto3
 from boto3.dynamodb.conditions import Key, Attr
-from common.ws_notify import send_progress
+from common.ws_notify import send_progress, send_token_usage
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -212,7 +212,8 @@ def lambda_handler(event: dict, context) -> dict:
 
     if is_final:
         # Final assembly: AI integrates all fragments into coherent script
-        assembled_script = _final_assembly(client, all_elements, image_bytes, image_media_type)
+        assembled_script, asm_in, asm_out = _final_assembly(client, all_elements, image_bytes, image_media_type)
+        send_token_usage(session_id, "VERIFYING_FINAL", asm_in, asm_out)
         # Validate the assembled script
         from common.script_validator import validate_cadquery_script, ScriptValidationError
         try:
@@ -238,10 +239,11 @@ def lambda_handler(event: dict, context) -> dict:
         )
 
     # --- Regular verification iteration ---
-    updated_elements = _verify_elements(
+    updated_elements, ver_in, ver_out = _verify_elements(
         client, low_conf_elements, high_conf_elements,
         human_comment, image_bytes, image_media_type,
     )
+    send_token_usage(session_id, "VERIFYING_DIMENSIONS", ver_in, ver_out)
 
     # Update DynamoDB with new confidence scores
     low_after_update = 0
@@ -432,7 +434,7 @@ def _verify_elements(
         image_media_type=image_media_type,
     )
 
-    return _parse_elements(raw_response)
+    return _parse_elements(raw_response.text), raw_response.input_tokens, raw_response.output_tokens
 
 
 def _final_assembly(
@@ -457,19 +459,19 @@ def _final_assembly(
     )
 
     # Parse JSON response
-    text = raw_response.strip()
+    text = raw_response.text.strip()
     start = text.find("{")
     end = text.rfind("}")
     if start != -1 and end != -1:
         try:
             parsed = json.loads(text[start : end + 1])
-            return parsed.get("cadquery_script", "")
+            return parsed.get("cadquery_script", ""), raw_response.input_tokens, raw_response.output_tokens
         except json.JSONDecodeError:
             pass
 
     # If not JSON, assume the entire response is the script
     logger.warning("Final assembly response not JSON, using raw text")
-    return text
+    return text, raw_response.input_tokens, raw_response.output_tokens
 
 
 def _assemble_script_template(elements: list[dict]) -> str:

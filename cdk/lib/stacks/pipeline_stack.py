@@ -80,6 +80,7 @@ class PipelineStack(Stack):
         bedrock_policy = iam.PolicyStatement(
             actions=[
                 "bedrock:InvokeModel",
+                "bedrock:InvokeModelWithResponseStream",
                 "aws-marketplace:ViewSubscriptions",
                 "aws-marketplace:Subscribe",
             ],

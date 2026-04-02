@@ -129,6 +129,7 @@ class LambdaStack(Stack):
             iam.PolicyStatement(
                 actions=[
                     "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream",
                     "aws-marketplace:ViewSubscriptions",
                     "aws-marketplace:Subscribe",
                 ],

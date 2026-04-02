@@ -11,6 +11,14 @@ interface ChatPanelProps {
   selectionContext?: string;
   /** パイプライン再実行が完了したら true になる（親が管理） */
   pipelineComplete?: boolean;
+  /** 検証中モード: true の場合は HTTP API の代わりに WebSocket コメントを送信 */
+  verifyMode?: boolean;
+  /** 検証コメント送信コールバック（verifyMode=true のとき使用） */
+  onVerifyComment?: (comment: string) => void;
+  /** 3Dモデル生成中フラグ（入力無効化に使用） */
+  isBuildingFinal?: boolean;
+  /** トークン数が更新されたとき通知するコールバック */
+  onTokenUsage?: (inputTokens: number, outputTokens: number) => void;
 }
 
 interface ChatMessage {
@@ -18,7 +26,7 @@ interface ChatMessage {
   content: string;
 }
 
-export function ChatPanel({ sessionId, nodeId, idToken, onChatNodeCreated, selectionContext, pipelineComplete }: ChatPanelProps) {
+export function ChatPanel({ sessionId, nodeId, idToken, onChatNodeCreated, selectionContext, pipelineComplete, verifyMode, onVerifyComment, isBuildingFinal, onTokenUsage }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -42,11 +50,24 @@ export function ChatPanel({ sessionId, nodeId, idToken, onChatNodeCreated, selec
   }, [messages]);
 
   const handleSend = async () => {
-    if (!input.trim() || !sessionId || !nodeId) return;
+    if (!input.trim() || !sessionId) return;
 
     const userMessage = input.trim();
     setInput("");
     setMessages((prev) => [...prev, { role: "user", content: userMessage }]);
+
+    // --- 検証モード: WebSocket 経由でコメント送信 ---
+    if (verifyMode && onVerifyComment) {
+      onVerifyComment(userMessage);
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: "✅ 検証AIにコメントを送信しました。次の反復に反映されます。" },
+      ]);
+      return;
+    }
+
+    // --- 通常モード: HTTP API 経由でモデル修正 ---
+    if (!nodeId) return;
     setLoading(true);
 
     try {
@@ -63,7 +84,7 @@ export function ChatPanel({ sessionId, nodeId, idToken, onChatNodeCreated, selec
       );
       if (!res.ok) throw new Error("チャットリクエストに失敗しました");
 
-      const data = (await res.json()) as { diff_patch?: string; node_id?: string };
+      const data = (await res.json()) as { diff_patch?: string; node_id?: string; input_tokens?: number; output_tokens?: number };
       setMessages((prev) => [
         ...prev,
         {
@@ -73,6 +94,10 @@ export function ChatPanel({ sessionId, nodeId, idToken, onChatNodeCreated, selec
             : "モデルを更新しました。再生成中...",
         },
       ]);
+
+      if (data.input_tokens != null || data.output_tokens != null) {
+        onTokenUsage?.(data.input_tokens ?? 0, data.output_tokens ?? 0);
+      }
 
       // 新 node_id をパイプライン再実行のために親へ通知
       if (data.node_id && onChatNodeCreated) {
@@ -97,14 +122,16 @@ export function ChatPanel({ sessionId, nodeId, idToken, onChatNodeCreated, selec
   };
 
   return (
-    <div className="flex flex-1 flex-col border-b" aria-label="AIチャット">
-      <h3 className="border-b px-4 py-2 text-sm font-medium text-gray-700">
-        AIチャット
+    <div className="flex min-h-0 flex-1 flex-col" aria-label="AIチャット">
+      <h3 className="shrink-0 border-b px-4 py-2 text-sm font-medium text-gray-700">
+        {verifyMode ? "検証チャット" : "AIチャット"}
       </h3>
       <div className="flex-1 overflow-y-auto p-3 space-y-2" role="log" aria-live="polite">
         {messages.length === 0 && (
           <p className="text-center text-xs text-gray-400 py-4">
-            モデルの修正指示を入力してください
+            {verifyMode
+              ? "検証AIへのコメントを入力してください（次の反復に反映）"
+              : "モデルの修正指示を入力してください"}
           </p>
         )}
         {selectionContext && (
@@ -136,7 +163,7 @@ export function ChatPanel({ sessionId, nodeId, idToken, onChatNodeCreated, selec
         )}
         <div ref={bottomRef} />
       </div>
-      <div className="flex gap-2 border-t p-3">
+      <div className="shrink-0 flex gap-2 border-t p-3">
         <label htmlFor="chat-input" className="sr-only">
           メッセージ入力
         </label>
@@ -146,14 +173,14 @@ export function ChatPanel({ sessionId, nodeId, idToken, onChatNodeCreated, selec
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="例: 穴の直径を8mmに変更して"
+          placeholder={verifyMode ? "例: 穴の位置が上面図と一致していません" : "例: 穴の直径を8mmに変更して"}
           className="flex-1 rounded-lg border px-3 py-1.5 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-          disabled={!sessionId || loading}
+          disabled={!sessionId || loading || isBuildingFinal}
         />
         <button
           type="button"
           onClick={handleSend}
-          disabled={!input.trim() || loading}
+          disabled={!input.trim() || loading || isBuildingFinal}
           className="rounded-lg bg-blue-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
           aria-label="メッセージ送信"
         >

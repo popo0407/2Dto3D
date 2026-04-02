@@ -9,11 +9,10 @@ import { getIdToken, signOut } from "./auth";
 import { WS_URL, API_BASE } from "./config";
 
 type AppView = "upload" | "viewer";
-type SideTab = "chat" | "verify";
 
 // WebSocket から届く通知メッセージの型
 interface WsNotifyMessage {
-  type: "PROCESSING_COMPLETE" | "PROCESSING_FAILED" | "PROGRESS" | "AI_QUESTION" | "VERIFICATION_PROGRESS" | string;
+  type: "PROCESSING_COMPLETE" | "PROCESSING_FAILED" | "PROGRESS" | "AI_QUESTION" | "VERIFICATION_PROGRESS" | "TOKEN_USAGE" | string;
   session_id?: string;
   node_id?: string;
   gltf_url?: string;
@@ -27,6 +26,9 @@ interface WsNotifyMessage {
   iteration_count?: number;
   all_verified?: boolean;
   elements?: VerificationElement[];
+  // Token usage fields
+  input_tokens?: number;
+  output_tokens?: number;
 }
 
 interface VerificationIteration {
@@ -55,7 +57,10 @@ export default function App() {
   const [aiReasoning, setAiReasoning] = useState<string>("");
   const [selection, setSelection] = useState<SelectionInfo | null>(null);
   const [chatPipelineComplete, setChatPipelineComplete] = useState(false);
-  const [sideTab, setSideTab] = useState<SideTab>("chat");
+
+  // Token usage state (accumulated across all steps)
+  const [totalInputTokens, setTotalInputTokens] = useState(0);
+  const [totalOutputTokens, setTotalOutputTokens] = useState(0);
 
   // Verification state
   const [verifyElements, setVerifyElements] = useState<VerificationElement[]>([]);
@@ -95,7 +100,6 @@ export default function App() {
               // Track verification state
               if (msg.step === "VERIFYING_DIMENSIONS" || msg.step === "EXTRACTING_DIMENSIONS") {
                 setIsVerifying(true);
-                setSideTab("verify");
               }
             } else if (msg.type === "VERIFICATION_PROGRESS") {
               const elems = msg.elements ?? [];
@@ -114,7 +118,9 @@ export default function App() {
                   timestamp: Date.now(),
                 },
               ]);
-              setSideTab("verify");
+            } else if (msg.type === "TOKEN_USAGE") {
+              setTotalInputTokens((prev) => prev + (msg.input_tokens ?? 0));
+              setTotalOutputTokens((prev) => prev + (msg.output_tokens ?? 0));
             } else if (msg.type === "AI_QUESTION" && msg.questions?.length) {
             setAiQuestions(msg.questions);
           } else if (msg.type === "PROCESSING_COMPLETE" && msg.node_id && msg.gltf_url) {
@@ -147,6 +153,11 @@ export default function App() {
   const handleChatNodeCreated = useCallback(
     (sid: string, _newNodeId: string) => {
       setChatPipelineComplete(false);
+      setGltfUrl("");
+      setVerifyElements([]);
+      setVerifyIterations([]);
+      setIsVerifying(false);
+      setIsBuildingFinal(false);
       setProcessingStep("BUILDING");
       setProcessingProgress(55);
       setView("viewer");
@@ -169,7 +180,7 @@ export default function App() {
         },
       );
     },
-    [handleProcessingStart, idToken],
+    [handleProcessingStart],
   );
 
   const handleLoginSuccess = async () => {
@@ -194,7 +205,8 @@ export default function App() {
     setCurrentVerifyIteration(0);
     setHighlightedElement(null);
     setIsBuildingFinal(false);
-    setSideTab("chat");
+    setTotalInputTokens(0);
+    setTotalOutputTokens(0);
     setView("upload");
   };
 
@@ -278,6 +290,15 @@ export default function App() {
           >
             3Dビューア
           </button>
+          {/* Token usage display */}
+          {(totalInputTokens > 0 || totalOutputTokens > 0) && (
+            <div className="ml-4 flex items-center gap-2 rounded-md bg-gray-100 px-3 py-1 text-xs text-gray-600" title="累計トークン使用量">
+              <span>入力: <span className="font-mono font-semibold text-gray-800">{totalInputTokens.toLocaleString()}</span></span>
+              <span className="text-gray-400">/</span>
+              <span>出力: <span className="font-mono font-semibold text-gray-800">{totalOutputTokens.toLocaleString()}</span></span>
+              <span className="text-gray-400">tok</span>
+            </div>
+          )}
           <button
             type="button"
             onClick={handleSignOut}
@@ -343,117 +364,99 @@ export default function App() {
                 </div>
               )}
             </section>
-            <aside className="flex w-1/2 flex-col border-l bg-white" aria-label="サイドパネル">
-              {/* Tab switcher */}
-              <div className="flex border-b">
-                <button
-                  type="button"
-                  onClick={() => setSideTab("chat")}
-                  className={`flex-1 px-3 py-2 text-xs font-medium ${
-                    sideTab === "chat"
-                      ? "border-b-2 border-blue-600 text-blue-700"
-                      : "text-gray-500 hover:text-gray-700"
-                  }`}
-                >
-                  チャット
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSideTab("verify")}
-                  className={`flex-1 px-3 py-2 text-xs font-medium ${
-                    sideTab === "verify"
-                      ? "border-b-2 border-indigo-600 text-indigo-700"
-                      : "text-gray-500 hover:text-gray-700"
-                  }`}
-                >
-                  検証
-                  {isVerifying && (
-                    <span className="ml-1 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-indigo-500" />
-                  )}
-                </button>
+            <aside className="flex w-1/2 min-h-0 flex-col border-l bg-white overflow-hidden" aria-label="サイドパネル">
+              {/* AI reasoning and questions (collapsible, shrink-0) */}
+              <div className="shrink-0">
+                {aiReasoning && (
+                  <details className="border-b" open>
+                    <summary className="cursor-pointer bg-indigo-50 px-4 py-2 text-xs font-semibold text-indigo-700 hover:bg-indigo-100">
+                      AIの解析理由
+                    </summary>
+                    <div className="max-h-48 overflow-y-auto px-4 py-3 text-xs text-gray-700 whitespace-pre-wrap leading-relaxed">
+                      {aiReasoning}
+                    </div>
+                  </details>
+                )}
+                {aiQuestions.length > 0 && (
+                  <div
+                    className="border-b bg-amber-50 px-4 py-3"
+                    role="alert"
+                    aria-label="AIからの質問"
+                  >
+                    <p className="mb-2 text-xs font-semibold text-amber-700">
+                      AI が確認を求めています
+                    </p>
+                    <ul className="space-y-1">
+                      {aiQuestions.map((q) => (
+                        <li key={q.id} className="text-xs text-amber-800">
+                          <span className="font-medium">[{q.feature_id ?? q.id}]</span> {q.text}
+                        </li>
+                      ))}
+                    </ul>
+                    <button
+                      type="button"
+                      onClick={() => setAiQuestions([])}
+                      className="mt-2 text-xs text-amber-600 underline hover:text-amber-800"
+                    >
+                      閉じる
+                    </button>
+                  </div>
+                )}
               </div>
 
-              {aiReasoning && (
-                <details className="border-b" open>
-                  <summary className="cursor-pointer bg-indigo-50 px-4 py-2 text-xs font-semibold text-indigo-700 hover:bg-indigo-100">
-                    AIの解析理由
-                  </summary>
-                  <div className="max-h-60 overflow-y-auto px-4 py-3 text-xs text-gray-700 whitespace-pre-wrap leading-relaxed">
-                    {aiReasoning}
-                  </div>
-                </details>
-              )}
-              {aiQuestions.length > 0 && (
-                <div
-                  className="border-b bg-amber-50 px-4 py-3"
-                  role="alert"
-                  aria-label="AIからの質問"
-                >
-                  <p className="mb-2 text-xs font-semibold text-amber-700">
-                    AI が確認を求めています
-                  </p>
-                  <ul className="space-y-1">
-                    {aiQuestions.map((q) => (
-                      <li key={q.id} className="text-xs text-amber-800">
-                        <span className="font-medium">[{q.feature_id ?? q.id}]</span> {q.text}
-                      </li>
-                    ))}
-                  </ul>
-                  <button
-                    type="button"
-                    onClick={() => setAiQuestions([])}
-                    className="mt-2 text-xs text-amber-600 underline hover:text-amber-800"
-                  >
-                    閉じる
-                  </button>
+              {/* Verification elements (visible when verifying, shrinkable) */}
+              {verifyElements.length > 0 && (
+                <div className="flex max-h-64 shrink-0 flex-col border-b overflow-hidden">
+                  <VerificationPanel
+                    sessionId={sessionId}
+                    elements={verifyElements}
+                    iterations={verifyIterations}
+                    isVerifying={isVerifying}
+                    currentIteration={currentVerifyIteration}
+                    maxIterations={5}
+                    isBuildingFinal={isBuildingFinal}
+                    highlightedElement={highlightedElement}
+                    onElementClick={setHighlightedElement}
+                  />
                 </div>
               )}
 
-              {sideTab === "chat" ? (
-                <>
-                  <ChatPanel
-                    sessionId={sessionId}
-                    nodeId={nodeId}
-                    idToken={idToken}
-                    onChatNodeCreated={(newNodeId) => handleChatNodeCreated(sessionId, newNodeId)}
-                    selectionContext={
-                      selection
-                        ? [
-                            selection.meshName,
-                            selection.featureId ? `Feature: ${selection.featureId}` : "",
-                            selection.cylinderInfo
-                              ? `穴: Φ${selection.cylinderInfo.diameter} ${selection.cylinderInfo.axis}軸 深さ${selection.cylinderInfo.depth}`
-                              : "",
-                            selection.faceDimensions
-                              ? `面: ${selection.faceDimensions.width}×${selection.faceDimensions.height} 面積${selection.faceDimensions.area}`
-                              : "",
-                            `全体: W:${selection.dimensions.width} H:${selection.dimensions.height} D:${selection.dimensions.depth}`,
-                            selection.normal
-                              ? `面方向: ${selection.normal.x > 0.5 ? "+X" : selection.normal.x < -0.5 ? "-X" : ""}${selection.normal.y > 0.5 ? "+Y" : selection.normal.y < -0.5 ? "-Y" : ""}${selection.normal.z > 0.5 ? "+Z" : selection.normal.z < -0.5 ? "-Z" : "斜面"}`
-                              : "",
-                          ]
-                            .filter(Boolean)
-                            .join(" / ")
-                        : undefined
-                    }
-                    pipelineComplete={chatPipelineComplete}
-                  />
-                  <HistoryPanel sessionId={sessionId} onNodeSelect={setNodeId} idToken={idToken} />
-                </>
-              ) : (
-                <VerificationPanel
-                  sessionId={sessionId}
-                  elements={verifyElements}
-                  iterations={verifyIterations}
-                  isVerifying={isVerifying}
-                  currentIteration={currentVerifyIteration}
-                  maxIterations={5}
-                  onSendComment={handleVerifyComment}
-                  isBuildingFinal={isBuildingFinal}
-                  highlightedElement={highlightedElement}
-                  onElementClick={setHighlightedElement}
-                />
-              )}
+              {/* Unified chat (flex-1, always visible) */}
+              <ChatPanel
+                sessionId={sessionId}
+                nodeId={nodeId}
+                idToken={idToken}
+                onChatNodeCreated={(newNodeId) => handleChatNodeCreated(sessionId, newNodeId)}
+                selectionContext={
+                  selection
+                    ? [
+                        selection.meshName,
+                        selection.featureId ? `Feature: ${selection.featureId}` : "",
+                        selection.cylinderInfo
+                          ? `穴: Φ${selection.cylinderInfo.diameter} ${selection.cylinderInfo.axis}軸 深さ${selection.cylinderInfo.depth}`
+                          : "",
+                        selection.faceDimensions
+                          ? `面: ${selection.faceDimensions.width}×${selection.faceDimensions.height} 面積${selection.faceDimensions.area}`
+                          : "",
+                        `全体: W:${selection.dimensions.width} H:${selection.dimensions.height} D:${selection.dimensions.depth}`,
+                        selection.normal
+                          ? `面方向: ${selection.normal.x > 0.5 ? "+X" : selection.normal.x < -0.5 ? "-X" : ""}${selection.normal.y > 0.5 ? "+Y" : selection.normal.y < -0.5 ? "-Y" : ""}${selection.normal.z > 0.5 ? "+Z" : selection.normal.z < -0.5 ? "-Z" : "斜面"}`
+                          : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" / ")
+                    : undefined
+                }
+                pipelineComplete={chatPipelineComplete}
+                verifyMode={isVerifying}
+                onVerifyComment={handleVerifyComment}
+                isBuildingFinal={isBuildingFinal}
+                onTokenUsage={(inp, out) => {
+                  setTotalInputTokens((prev) => prev + inp);
+                  setTotalOutputTokens((prev) => prev + out);
+                }}
+              />
+              <HistoryPanel sessionId={sessionId} onNodeSelect={setNodeId} idToken={idToken} />
             </aside>
           </>
         )}

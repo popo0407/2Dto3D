@@ -97,13 +97,13 @@ def lambda_handler(event: dict, context) -> dict:
 
     try:
         client = get_bedrock_client(region=BEDROCK_REGION)
-        raw_response = client.invoke_multimodal(prompt=prompt)
+        invoke_result = client.invoke_multimodal(prompt=prompt)
     except Exception as e:
         logger.error("Bedrock invocation failed: %s", e)
         return _response(502, {"error": f"AI invocation failed: {e}"})
 
     # Parse response
-    ai_output = _parse_ai_response(raw_response)
+    ai_output = _parse_ai_response(invoke_result.text)
     new_script = ai_output.get("cadquery_script", parent_script)
 
     # Validate
@@ -161,7 +161,7 @@ def lambda_handler(event: dict, context) -> dict:
         logger.warning("PROCESSING_QUEUE_URL not set — pipeline re-execution skipped")
 
     logger.info("Chat created new node %s from parent %s", new_node_id, node_id)
-    return _response(201, new_node)
+    return _response(201, {**new_node, "input_tokens": invoke_result.input_tokens, "output_tokens": invoke_result.output_tokens})
 
 
 def _parse_ai_response(raw: str) -> dict:
