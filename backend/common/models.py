@@ -85,6 +85,70 @@ def now_ts() -> int:
     return int(time.time())
 
 
+# ---------------------------------------------------------------------------
+# BuildPlan models (Interactive BuildPlan mode)
+# ---------------------------------------------------------------------------
+
+
+class StepParameter(BaseModel):
+    """BuildStep individual parameter with provenance info."""
+
+    value: Union[float, str, bool, int] = 0.0
+    unit: str = "mm"
+    source: Literal["extracted", "standard", "calculated", "user"] = "extracted"
+    confidence: float = 1.0
+
+
+class BuildPlanItem(BaseModel):
+    """Build plan metadata — one per session in BuildPlan mode."""
+
+    plan_id: str = Field(default_factory=generate_id)
+    session_id: str = ""
+    node_id: str = ""
+    plan_status: str = "planning"  # planning, active, executing, completed, archived
+    total_steps: int = 0
+    current_step: int = 0
+    created_at: int = Field(default_factory=now_ts)
+    updated_at: int = Field(default_factory=now_ts)
+    ttl: int = 0
+
+    def to_dynamo(self) -> dict:
+        d = self.model_dump()
+        if not d["ttl"]:
+            d["ttl"] = d["created_at"] + 90 * 86400
+        return d
+
+
+class BuildStepItem(BaseModel):
+    """Individual build step within a BuildPlan."""
+
+    plan_id: str = ""
+    step_seq: str = ""  # "0001", "0002", ...
+    step_type: str = ""  # base_body, hole_through, tapped_hole, fillet, chamfer, slot, pocket
+    step_name: str = ""  # Japanese label for UI display
+    parameters: dict = Field(default_factory=dict)  # key → StepParameter-compatible dict
+    cq_code: str = ""  # CadQuery code fragment for this step
+    dependencies: list[str] = Field(default_factory=list)
+    group_id: str = ""  # For batch operations on identical features
+    confidence: float = 0.0
+    status: str = "planned"  # planned, executing, completed, modified, failed
+    ai_reasoning: str = ""
+    checkpoint_step_key: str = ""  # S3 key for STEP checkpoint
+    checkpoint_glb_key: str = ""  # S3 key for GLB preview
+    executed_at: int = 0
+    ttl: int = 0
+
+    def to_dynamo(self) -> dict:
+        from decimal import Decimal
+
+        d = self.model_dump()
+        d["confidence"] = Decimal(str(d["confidence"]))
+        d["parameters"] = _float_to_decimal_dict(d["parameters"])
+        if not d["ttl"]:
+            d["ttl"] = now_ts() + 90 * 86400
+        return d
+
+
 class SessionItem(BaseModel):
     session_id: str = Field(default_factory=generate_id)
     user_id: str = ""
