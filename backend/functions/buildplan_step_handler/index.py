@@ -30,9 +30,11 @@ UPLOADS_BUCKET = os.environ.get("UPLOADS_BUCKET", "")
 ARTIFACTS_BUCKET = os.environ.get("ARTIFACTS_BUCKET", "")
 PREVIEWS_BUCKET = os.environ.get("PREVIEWS_BUCKET", "")
 BEDROCK_REGION = os.environ.get("BEDROCK_REGION", "ap-northeast-1")
+BUILDPLAN_WORKER_FUNCTION_NAME = os.environ.get("BUILDPLAN_WORKER_FUNCTION_NAME", "")
 
 dynamodb = boto3.resource("dynamodb")
 s3_client = boto3.client("s3")
+lambda_client = boto3.client("lambda")
 
 # Minimal valid glTF 2.0 for dev mock
 PLACEHOLDER_GLTF = json.dumps({
@@ -55,6 +57,10 @@ def lambda_handler(event: dict, context) -> dict:
     resource = event.get("resource", "")
 
     plan_id = (event.get("pathParameters") or {}).get("plan_id", "")
+
+    # GET /build-plans/{plan_id} — plan status for polling
+    if resource == "/build-plans/{plan_id}" and http_method == "GET":
+        return _get_plan(plan_id)
 
     # GET /build-plans/{plan_id}/steps
     if resource.endswith("/steps") and http_method == "GET":
@@ -115,51 +121,26 @@ def _get_step(plan_id: str, step_seq: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Get plan (status polling endpoint)
+# ---------------------------------------------------------------------------
+
+def _get_plan(plan_id: str) -> dict:
+    """Return plan metadata including plan_status for frontend polling."""
+    plans_table = dynamodb.Table(BUILD_PLANS_TABLE)
+    resp = plans_table.get_item(Key={"plan_id": plan_id})
+    plan = resp.get("Item")
+    if not plan:
+        return _response(404, {"error": "Plan not found"})
+    return _response(200, _decimal_to_float_dict(plan))
+
+
+# ---------------------------------------------------------------------------
 # Modify step
 # ---------------------------------------------------------------------------
 
-MODIFY_PROMPT = """以下のBuildPlanのステップを、ユーザーの指示に従い修正してください。
-
-【対象ステップ】
-{target_step}
-
-【BuildPlan 全ステップ】
-{all_steps}
-
-【ユーザーの修正指示】
-{user_instruction}
-
-【修正ルール】
-1. 修正されたステップから最終ステップまでの全てを再計画してください
-2. 修正前のステップ（対象ステップより前）はそのまま維持
-3. 同じ group_id を持つステップがある場合、一括修正が必要か検討
-4. 各ステップの cq_code は前のステップの result を引き継ぐこと
-5. 穴あけは必ず .faces("...").workplane().pushPoints([...]).hole(d) 形式
-6. .box() は原点中心に生成（座標変換が必要）
-
-【出力フォーマット（JSON のみ）】
-```json
-{{
-  "reasoning": "修正内容の説明（日本語）",
-  "modified_steps": [
-    {{
-      "step_seq": "0002",
-      "step_type": "...",
-      "step_name": "...",
-      "parameters": {{...}},
-      "cq_code": "...",
-      "group_id": "...",
-      "confidence": 0.95,
-      "ai_reasoning": "..."
-    }}
-  ]
-}}
-```
-"""
-
 
 def _modify_step(plan_id: str, step_seq: str, body: dict) -> dict:
-    """Modify a step via parameter update or natural language instruction.
+    """Kick off async step modification via worker Lambda.
 
     Body format:
     {
@@ -168,6 +149,7 @@ def _modify_step(plan_id: str, step_seq: str, body: dict) -> dict:
       "instruction": "...",      // for natural_language type
       "batch": false             // if true, apply to all steps with same group_id
     }
+    Returns 202 immediately; actual AI work is done by buildplan_worker_handler.
     """
     modification_type = body.get("type", "natural_language")
     instruction = body.get("instruction", "")
@@ -183,165 +165,58 @@ def _modify_step(plan_id: str, step_seq: str, body: dict) -> dict:
 
     session_id = plan.get("session_id", "")
 
-    # Send progress
-    from common.ws_notify import send_progress
-    send_progress(session_id, "BUILDPLAN_MODIFYING", 10, "ステップ修正中...")
-
-    # Load all steps
+    # Load all steps to validate target exists and build parameter instruction
     steps_table = dynamodb.Table(BUILD_STEPS_TABLE)
     all_steps = _query_all_steps(plan_id, steps_table)
 
-    # Find target step
-    target_step = None
-    target_idx = -1
-    for i, s in enumerate(all_steps):
-        if s["step_seq"] == step_seq:
-            target_step = s
-            target_idx = i
-            break
-
+    target_step = next((s for s in all_steps if s["step_seq"] == step_seq), None)
     if not target_step:
         return _response(404, {"error": "Step not found"})
 
-    if modification_type == "parameter":
-        # Direct parameter update — regenerate cq_code via AI
-        return _modify_by_parameters(
-            plan_id, session_id, step_seq, target_step, target_idx,
-            all_steps, new_params, batch, steps_table, plans_table,
-        )
-    else:
-        # Natural language modification — full AI replan
-        return _modify_by_natural_language(
-            plan_id, session_id, step_seq, target_step, target_idx,
-            all_steps, instruction, steps_table, plans_table,
-        )
+    # For parameter modifications, convert to natural language instruction
+    if modification_type == "parameter" and new_params:
+        parts = []
+        for key, val in new_params.items():
+            v = val.get("value", val) if isinstance(val, dict) else val
+            parts.append(f"{key} = {v}")
+        group_id = target_step.get("group_id", "")
+        instruction = f"Step {step_seq} のパラメータを変更: " + ", ".join(parts)
+        if batch and group_id:
+            batch_seqs = [s["step_seq"] for s in all_steps if s.get("group_id") == group_id and s["step_seq"] != step_seq]
+            if batch_seqs:
+                instruction += f"\n同じ group_id ({group_id}) のステップも同様に変更: " + ", ".join(batch_seqs)
 
-
-def _modify_by_parameters(
-    plan_id, session_id, step_seq, target_step, target_idx,
-    all_steps, new_params, batch, steps_table, plans_table,
-) -> dict:
-    """Update step parameters and regenerate CadQuery code via AI."""
-    # Merge new parameters into existing
-    existing_params = target_step.get("parameters", {})
-    for key, val in new_params.items():
-        if isinstance(val, dict):
-            existing_params[key] = val
-        else:
-            existing_params[key] = {"value": val, "unit": "mm", "source": "user", "confidence": 1.0}
-
-    # If batch mode, find all steps with same group_id
-    group_id = target_step.get("group_id", "")
-    batch_steps = []
-    if batch and group_id:
-        batch_steps = [s for s in all_steps if s.get("group_id") == group_id and s["step_seq"] != step_seq]
-
-    # Build AI prompt for regenerating cq_code
-    instruction_parts = []
-    for key, val in new_params.items():
-        v = val.get("value", val) if isinstance(val, dict) else val
-        instruction_parts.append(f"{key} = {v}")
-    instruction = f"Step {step_seq} のパラメータを変更: " + ", ".join(instruction_parts)
-    if batch_steps:
-        instruction += f"\n同じ group_id ({group_id}) のステップも同様に変更: " + ", ".join(s["step_seq"] for s in batch_steps)
-
-    return _modify_by_natural_language(
-        plan_id, session_id, step_seq, target_step, target_idx,
-        all_steps, instruction, steps_table, plans_table,
-    )
-
-
-def _modify_by_natural_language(
-    plan_id, session_id, step_seq, target_step, target_idx,
-    all_steps, instruction, steps_table, plans_table,
-) -> dict:
-    """Use AI to replan from target step based on natural language instruction."""
-    from common.ws_notify import send_progress, send_token_usage
-
-    send_progress(session_id, "BUILDPLAN_REPLANNING", 30, "AI再計画中...")
-
-    # Prepare prompt
-    target_step_text = json.dumps(_decimal_to_float_dict(target_step), ensure_ascii=False, indent=2)
-    all_steps_text = json.dumps([_decimal_to_float_dict(s) for s in all_steps], ensure_ascii=False, indent=2)
-
-    prompt = MODIFY_PROMPT.format(
-        target_step=target_step_text,
-        all_steps=all_steps_text,
-        user_instruction=instruction,
-    )
-
-    # Load image for context
-    sessions_table = dynamodb.Table(SESSIONS_TABLE)
-    resp = sessions_table.get_item(Key={"session_id": session_id})
-    session = resp.get("Item", {})
-    image_bytes, image_media_type = _load_first_image(session)
-
-    from common.bedrock_client import get_bedrock_client
-    client = get_bedrock_client(region=BEDROCK_REGION)
-    invoke_result = client.invoke_multimodal(
-        prompt=prompt,
-        image_bytes=image_bytes,
-        image_media_type=image_media_type,
-        system_prompt="あなたは機械設計の専門家です。BuildPlanのステップ修正を行ってください。",
-        max_tokens=16384,
-    )
-    send_token_usage(session_id, "BUILDPLAN_REPLANNING", invoke_result.input_tokens, invoke_result.output_tokens)
-
-    # Parse AI response
-    ai_output = _parse_ai_response(invoke_result.text)
-    modified_steps = ai_output.get("modified_steps", [])
-    reasoning = ai_output.get("reasoning", "")
-
-    if not modified_steps:
-        return _response(500, {"error": "AI failed to generate modified steps"})
-
-    # Update modified steps in DynamoDB
-    now = int(time.time())
-    updated_steps = []
-    for mod_step in modified_steps:
-        seq = mod_step.get("step_seq", "")
-        if not seq:
-            continue
-        steps_table.update_item(
-            Key={"plan_id": plan_id, "step_seq": seq},
-            UpdateExpression=(
-                "SET step_type = :stype, step_name = :sname, "
-                "parameters = :params, cq_code = :code, "
-                "group_id = :gid, confidence = :conf, "
-                "#st = :status, ai_reasoning = :reason"
-            ),
-            ExpressionAttributeNames={"#st": "status"},
-            ExpressionAttributeValues={
-                ":stype": mod_step.get("step_type", ""),
-                ":sname": mod_step.get("step_name", ""),
-                ":params": _float_to_decimal(mod_step.get("parameters", {})),
-                ":code": mod_step.get("cq_code", ""),
-                ":gid": mod_step.get("group_id", ""),
-                ":conf": Decimal(str(mod_step.get("confidence", 0.0))),
-                ":status": "modified",
-                ":reason": mod_step.get("ai_reasoning", ""),
-            },
-        )
-        updated_steps.append(mod_step)
-
-    # Update plan metadata
+    # Set plan status to "modifying"
     plans_table.update_item(
         Key={"plan_id": plan_id},
-        UpdateExpression="SET updated_at = :now",
-        ExpressionAttributeValues={":now": now},
+        UpdateExpression="SET plan_status = :s, updated_at = :now",
+        ExpressionAttributeValues={
+            ":s": "modifying",
+            ":now": int(time.time()),
+        },
     )
 
-    send_progress(session_id, "BUILDPLAN_MODIFIED", 100, "ステップ修正完了")
+    # Invoke worker asynchronously
+    if not BUILDPLAN_WORKER_FUNCTION_NAME:
+        return _response(500, {"error": "Worker function not configured"})
 
-    logger.info("Modified %d steps in plan %s", len(updated_steps), plan_id)
-    return _response(200, {
-        "plan_id": plan_id,
-        "reasoning": reasoning,
-        "modified_steps": updated_steps,
-        "modified_count": len(updated_steps),
-        "input_tokens": invoke_result.input_tokens,
-        "output_tokens": invoke_result.output_tokens,
-    })
+    lambda_client.invoke(
+        FunctionName=BUILDPLAN_WORKER_FUNCTION_NAME,
+        InvocationType="Event",
+        Payload=json.dumps({
+            "action": "modify",
+            "plan_id": plan_id,
+            "session_id": session_id,
+            "step_seq": step_seq,
+            "instruction": instruction,
+        }).encode(),
+    )
+
+    logger.info("Modify kick-off: plan=%s step=%s", plan_id, step_seq)
+    return _response(202, {"status": "modifying", "plan_id": plan_id})
+
+
+
 
 
 # ---------------------------------------------------------------------------

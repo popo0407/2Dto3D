@@ -88,7 +88,6 @@ export function BuildPlanPanel({
   plan,
   onPlanCreated,
   onExecutionComplete,
-  onTokenUsage,
 }: Props) {
   const [selectedStep, setSelectedStep] = useState<string | null>(null);
   const [editingParams, setEditingParams] = useState<Record<string, string>>({});
@@ -100,6 +99,12 @@ export function BuildPlanPanel({
   const [executionLog, setExecutionLog] = useState<string[]>([]);
   const [localSteps, setLocalSteps] = useState<BuildStep[]>([]);
   const chatInputRef = useRef<HTMLInputElement>(null);
+  const pollingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Cleanup polling timer on unmount
+  useEffect(() => () => {
+    if (pollingTimerRef.current) clearTimeout(pollingTimerRef.current);
+  }, []);
 
   useEffect(() => {
     if (plan?.steps) {
@@ -115,11 +120,54 @@ export function BuildPlanPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
+  // --- Poll plan status until planned or failed ---
+  const startPolling = useCallback(
+    (
+      planId: string,
+      onDone: (planData: Record<string, unknown>, steps: BuildStep[]) => void,
+      onError: (msg: string) => void,
+    ) => {
+      const poll = async () => {
+        try {
+          const planRes = await fetch(`${API_BASE}/build-plans/${planId}`, {
+            headers: { Authorization: `Bearer ${idToken}` },
+          });
+          if (!planRes.ok) {
+            pollingTimerRef.current = setTimeout(poll, 3000);
+            return;
+          }
+          const planData = await planRes.json();
+          if (planData.plan_status === "planned") {
+            const stepsRes = await fetch(`${API_BASE}/build-plans/${planId}/steps`, {
+              headers: { Authorization: `Bearer ${idToken}` },
+            });
+            if (!stepsRes.ok) {
+              onError("ステップ取得に失敗しました");
+              return;
+            }
+            const stepsData = await stepsRes.json();
+            onDone(planData as Record<string, unknown>, stepsData.steps ?? []);
+          } else if (planData.plan_status === "failed") {
+            onError(planData.reasoning || "BuildPlan 処理に失敗しました");
+          } else {
+            // Still creating or modifying — keep polling
+            pollingTimerRef.current = setTimeout(poll, 3000);
+          }
+        } catch {
+          // Retry on network error
+          pollingTimerRef.current = setTimeout(poll, 3000);
+        }
+      };
+      pollingTimerRef.current = setTimeout(poll, 3000);
+    },
+    [idToken],
+  );
+
   // --- Create BuildPlan ---
   const handleCreatePlan = useCallback(async () => {
     setIsCreating(true);
     setError(null);
-    setExecutionLog(["BuildPlan を作成中..."]);
+    setExecutionLog(["AI が図面を分析中... (1〜2分かかる場合があります)"]);
     try {
       const res = await fetch(`${API_BASE}/sessions/${sessionId}/build-plans`, {
         method: "POST",
@@ -132,19 +180,34 @@ export function BuildPlanPanel({
         const data = await res.json();
         throw new Error(data.error ?? "BuildPlan 作成に失敗");
       }
-      const data = await res.json();
-      onPlanCreated(data as BuildPlan);
-      if (onTokenUsage && data.input_tokens) {
-        onTokenUsage(data.input_tokens, data.output_tokens);
-      }
-      setExecutionLog((prev) => [...prev, `BuildPlan 作成完了: ${data.total_steps} ステップ`]);
+      const { plan_id: planId } = await res.json();
+      // Backend returns 202 — poll until status = "planned"
+      startPolling(
+        planId,
+        (planData, steps) => {
+          onPlanCreated({
+            plan_id: planId,
+            session_id: String(planData.session_id ?? ""),
+            node_id: String(planData.node_id ?? ""),
+            total_steps: steps.length,
+            reasoning: String(planData.reasoning ?? ""),
+            steps,
+          });
+          setExecutionLog((prev) => [...prev, `BuildPlan 作成完了: ${steps.length} ステップ`]);
+          setIsCreating(false);
+        },
+        (msg) => {
+          setError(msg);
+          setExecutionLog((prev) => [...prev, `エラー: ${msg}`]);
+          setIsCreating(false);
+        },
+      );
     } catch (e) {
       setError(String(e));
       setExecutionLog((prev) => [...prev, `エラー: ${e}`]);
-    } finally {
       setIsCreating(false);
     }
-  }, [sessionId, idToken, onPlanCreated, onTokenUsage]);
+  }, [sessionId, idToken, onPlanCreated, startPolling]);
 
   // --- Execute Plan ---
   const handleExecute = useCallback(
@@ -200,26 +263,16 @@ export function BuildPlanPanel({
     setError(null);
     setExecutionLog((prev) => [...prev, `Step ${selectedStep} パラメータ修正中...`]);
     try {
-      // Convert editingParams to structured format
       const params: Record<string, { value: number | string; unit: string; source: string; confidence: number }> = {};
       for (const [key, val] of Object.entries(editingParams)) {
         const numVal = parseFloat(val);
-        params[key] = {
-          value: isNaN(numVal) ? val : numVal,
-          unit: "mm",
-          source: "user",
-          confidence: 1.0,
-        };
+        params[key] = { value: isNaN(numVal) ? val : numVal, unit: "mm", source: "user", confidence: 1.0 };
       }
-
       const res = await fetch(
         `${API_BASE}/build-plans/${plan.plan_id}/steps/${selectedStep}/modify`,
         {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${idToken}`,
-          },
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
           body: JSON.stringify({ type: "parameter", parameters: params }),
         },
       );
@@ -227,30 +280,25 @@ export function BuildPlanPanel({
         const data = await res.json();
         throw new Error(data.error ?? "修正に失敗");
       }
-      const data = await res.json();
-      if (onTokenUsage && data.input_tokens) {
-        onTokenUsage(data.input_tokens, data.output_tokens);
-      }
-      // Update local steps
-      if (data.modified_steps) {
-        setLocalSteps((prev) =>
-          prev.map((s) => {
-            const mod = data.modified_steps.find((m: BuildStep) => m.step_seq === s.step_seq);
-            return mod ? { ...s, ...mod, status: "modified" } : s;
-          }),
-        );
-      }
-      setExecutionLog((prev) => [
-        ...prev,
-        `修正完了: ${data.modified_count} ステップ更新`,
-        data.reasoning ?? "",
-      ]);
+      const { plan_id: planId } = await res.json();
+      // Backend returns 202 — poll until status = "planned"
+      startPolling(
+        planId,
+        (_planData, steps) => {
+          setLocalSteps(steps);
+          setExecutionLog((prev) => [...prev, `修正完了: ${steps.length} ステップ更新`]);
+          setIsModifying(false);
+        },
+        (msg) => {
+          setError(msg);
+          setIsModifying(false);
+        },
+      );
     } catch (e) {
       setError(String(e));
-    } finally {
       setIsModifying(false);
     }
-  }, [plan, selectedStep, editingParams, idToken, onTokenUsage]);
+  }, [plan, selectedStep, editingParams, idToken, startPolling]);
 
   const handleModifyByChat = useCallback(async () => {
     if (!plan || !selectedStep || !chatInput.trim()) return;
@@ -264,10 +312,7 @@ export function BuildPlanPanel({
         `${API_BASE}/build-plans/${plan.plan_id}/steps/${selectedStep}/modify`,
         {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${idToken}`,
-          },
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
           body: JSON.stringify({ type: "natural_language", instruction }),
         },
       );
@@ -275,29 +320,25 @@ export function BuildPlanPanel({
         const data = await res.json();
         throw new Error(data.error ?? "修正に失敗");
       }
-      const data = await res.json();
-      if (onTokenUsage && data.input_tokens) {
-        onTokenUsage(data.input_tokens, data.output_tokens);
-      }
-      if (data.modified_steps) {
-        setLocalSteps((prev) =>
-          prev.map((s) => {
-            const mod = data.modified_steps.find((m: BuildStep) => m.step_seq === s.step_seq);
-            return mod ? { ...s, ...mod, status: "modified" } : s;
-          }),
-        );
-      }
-      setExecutionLog((prev) => [
-        ...prev,
-        `AI修正完了: ${data.modified_count} ステップ更新`,
-        data.reasoning ?? "",
-      ]);
+      const { plan_id: planId } = await res.json();
+      // Backend returns 202 — poll until status = "planned"
+      startPolling(
+        planId,
+        (_planData, steps) => {
+          setLocalSteps(steps);
+          setExecutionLog((prev) => [...prev, `AI修正完了: ${steps.length} ステップ更新`]);
+          setIsModifying(false);
+        },
+        (msg) => {
+          setError(msg);
+          setIsModifying(false);
+        },
+      );
     } catch (e) {
       setError(String(e));
-    } finally {
       setIsModifying(false);
     }
-  }, [plan, selectedStep, chatInput, idToken, onTokenUsage]);
+  }, [plan, selectedStep, chatInput, idToken, startPolling]);
 
   // --- Select step ---
   const handleStepClick = useCallback(
