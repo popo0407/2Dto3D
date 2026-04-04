@@ -67,6 +67,8 @@ lambda_stack = LambdaStack(
     artifacts_bucket=network_stack.artifacts_bucket,
     previews_bucket=network_stack.previews_bucket,
     user_pool=auth_stack.user_pool,
+    build_plans_table=database_stack.build_plans_table,
+    build_steps_table=database_stack.build_steps_table,
     env=aws_env,
 )
 lambda_stack.add_dependency(database_stack)
