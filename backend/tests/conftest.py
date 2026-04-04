@@ -29,6 +29,8 @@ def aws_env(monkeypatch):
     monkeypatch.setenv("DRAWING_ELEMENTS_TABLE", "test-drawing-elements")
     monkeypatch.setenv("CONFIDENCE_THRESHOLD", "0.85")
     monkeypatch.setenv("MAX_VERIFY_ITERATIONS", "5")
+    monkeypatch.setenv("BUILD_PLANS_TABLE", "test-build-plans")
+    monkeypatch.setenv("BUILD_STEPS_TABLE", "test-build-steps")
 
 
 @pytest.fixture
@@ -104,6 +106,38 @@ def dynamodb_tables():
                     ],
                     "Projection": {"ProjectionType": "ALL"},
                 }
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+
+        # Build plans table
+        client.create_table(
+            TableName="test-build-plans",
+            KeySchema=[{"AttributeName": "plan_id", "KeyType": "HASH"}],
+            AttributeDefinitions=[
+                {"AttributeName": "plan_id", "AttributeType": "S"},
+                {"AttributeName": "session_id", "AttributeType": "S"},
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    "IndexName": "session_id-index",
+                    "KeySchema": [{"AttributeName": "session_id", "KeyType": "HASH"}],
+                    "Projection": {"ProjectionType": "ALL"},
+                }
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+
+        # Build steps table
+        client.create_table(
+            TableName="test-build-steps",
+            KeySchema=[
+                {"AttributeName": "plan_id", "KeyType": "HASH"},
+                {"AttributeName": "step_seq", "KeyType": "RANGE"},
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "plan_id", "AttributeType": "S"},
+                {"AttributeName": "step_seq", "AttributeType": "S"},
             ],
             BillingMode="PAY_PER_REQUEST",
         )
