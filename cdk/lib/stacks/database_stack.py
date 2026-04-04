@@ -99,3 +99,41 @@ class DatabaseStack(Stack):
                 name="confidence", type=dynamodb.AttributeType.NUMBER
             ),
         )
+
+        # ---------- build_plans table (BuildPlan mode) ----------
+        self.build_plans_table = dynamodb.Table(
+            self,
+            "BuildPlansTable",
+            table_name=f"{project_name}-{env_name}-build-plans",
+            partition_key=dynamodb.Attribute(
+                name="plan_id", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=removal,
+            time_to_live_attribute="ttl",
+        )
+        self.build_plans_table.add_global_secondary_index(
+            index_name="session_id-index",
+            partition_key=dynamodb.Attribute(
+                name="session_id", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="created_at", type=dynamodb.AttributeType.NUMBER
+            ),
+        )
+
+        # ---------- build_steps table (BuildPlan mode) ----------
+        self.build_steps_table = dynamodb.Table(
+            self,
+            "BuildStepsTable",
+            table_name=f"{project_name}-{env_name}-build-steps",
+            partition_key=dynamodb.Attribute(
+                name="plan_id", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="step_seq", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=removal,
+            time_to_live_attribute="ttl",
+        )
