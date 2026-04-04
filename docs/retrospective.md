@@ -483,4 +483,47 @@ nodes_table.update_item(
 ### 改善策・再発防止
 - `flex-1` だけでは flex 子要素の高さは親を超えてスクロールを効かせられない。`min-h-0` を組み合わせることで flex コンテナの高さ制約が正しく伝播する
 - 状態遷移時にリセットすべき状態を設計段階で洗い出す（今回は `gltfUrl`・`verifyElements`・`verifyIterations` のリセット漏れ）
+
+---
+
+## 2026-07 段階的構築モード（BuildPlan）実装
+
+### 実施内容
+- 既存の自動パイプラインと**別モード**として「段階的構築（BuildPlan）」機能を新規実装
+- AI が2D図面からステップバイステップの構築計画を生成し、各ステップのパラメータ編集・NLチャット修正・バッチ操作に対応
+- バックエンド: 2 Lambda ハンドラー（buildplan_create_handler, buildplan_step_handler）
+- インフラ: 2 DynamoDB テーブル（build_plans, build_steps）、6 REST API ルート
+- フロントエンド: BuildPlanPanel コンポーネント + App.tsx モード切替
+- テスト: 7テスト追加（全49テスト通過）
+
+### 変更ファイル一覧
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `backend/common/models.py` | `BuildPlanItem`, `BuildStepItem`, `StepParameter` Pydantic モデル追加 |
+| `backend/common/config.py` | `build_plans_table`, `build_steps_table` 環境変数フィールド追加 |
+| `backend/functions/buildplan_create_handler/index.py` | 新規 — AI BuildPlan 生成ハンドラー |
+| `backend/functions/buildplan_step_handler/index.py` | 新規 — ステップ CRUD / 修正 / 実行 / プレビューハンドラー |
+| `backend/tests/conftest.py` | `BUILD_PLANS_TABLE`, `BUILD_STEPS_TABLE` テーブル追加 |
+| `backend/tests/test_buildplan_step_handler.py` | 新規 — 7テスト（list/get/execute/preview/invalid route） |
+| `cdk/lib/stacks/database_stack.py` | `build_plans`, `build_steps` DynamoDB テーブル定義追加 |
+| `cdk/lib/stacks/lambda_stack.py` | 2 Lambda 関数 + 6 API ルート + WebSocket 権限追加 |
+| `cdk/app.py` | BuildPlan テーブルを LambdaStack に渡すよう更新 |
+| `frontend/src/components/BuildPlanPanel.tsx` | 新規 — ステップリスト / パラメータ / NL修正 / 実行UI |
+| `frontend/src/App.tsx` | BuildPlan モード切替 + state 管理統合 |
+| `README.md` | BuildPlan 機能説明・アーキテクチャ図・構成更新 |
+
+### 設計判断
+
+| 判断 | 理由 |
+|------|------|
+| Step Functions ではなく REST API Lambda を採用 | 各ステップをインタラクティブに修正・再実行する必要があり、Step Functions のリニアなフローでは対応困難 |
+| 既存パイプラインと完全に分離 | 要件として「別モード」が指定されており、既存機能への影響をゼロにするため |
+| Dev 環境ではプレースホルダー GLTF を返却 | 既存の mock_cadquery パターンに合わせ、ECS Fargate なしで動作可能 |
+| ステップ修正時に対象以降の全ステップをAI再計画 | CadQuery コードの依存関係（result 変数の引き継ぎ）があるため、部分修正では整合性が保てない |
+
+### 改善策・再発防止
+- 新テーブル追加時は `conftest.py` のフィクスチャにも同時に追加する
+- WebSocket API ID・execute-api 権限は Lambda 作成より後に付与する（CDK コンストラクタの実行順序に注意）
+- `ProcessingMode` のような未使用の型を残さないよう、TypeScript `--noEmit` チェックを習慣付ける
 - ストリーミング API のメタデータ（トークン数）は `message_start` イベント (`input_tokens`) と `message_delta` イベント (`output_tokens`) から取得できるし・コスト削減）

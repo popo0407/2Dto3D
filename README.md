@@ -28,6 +28,7 @@
 - 最終3Dモデル生成中のリアルタイム進捗表示
 - AIチャットによるモデル修正指示
 - STEPファイルダウンロード
+- **段階的構築モード（BuildPlan）**: AI がステップバイステップの構築計画を生成し、各ステップのパラメータ編集・NL チャット修正・バッチ操作が可能
 
 ## 開発環境セットアップ
 
@@ -79,7 +80,7 @@ python scripts/deploy.py --action destroy --environment dev
 
 ## 開発ステータス
 
-3Dモデル生成パイプライン稼働中。穴方向AI推論・面/Feature選択・チャット編集・再帰的寸法検証が利用可能。
+3Dモデル生成パイプライン稼働中。穴方向AI推論・面/Feature選択・チャット編集・再帰的寸法検証が利用可能。段階的構築モード（BuildPlan）を追加。
 
 ## アーキテクチャ
 
@@ -88,10 +89,13 @@ Frontend (React 18 + Three.js)
   ↓ REST API / WebSocket
 API Gateway → Lambda Handlers
   ↓ SQS
-Step Functions Pipeline:
+Step Functions Pipeline (Auto mode):
   Parse → AI Analyze (Bedrock) → Extract Dimensions → [Verify Loop] → Final Assembly → CadQuery (ECS Fargate) → Optimize → Validate → Notify (WebSocket)
+
+BuildPlan mode (Interactive):
+  Create Plan (Bedrock) → Step List UI → [Modify Step ↔ AI Replan] → Execute → Checkpoint Previews → Final Output
   ↓
-DynamoDB (Sessions / Nodes / Connections / DrawingElements)
+DynamoDB (Sessions / Nodes / Connections / DrawingElements / BuildPlans / BuildSteps)
 S3 (Uploads / Artifacts / Previews / Frontend)
 CloudFront CDN
 ```
@@ -123,6 +127,8 @@ CloudFront CDN
 │   │   ├── validate_handler/        # Step 7: 検証
 │   │   ├── notify_handler/          # Step 8: WebSocket通知
 │   │   ├── ws_handler/              # WebSocket接続管理 + verifyComment
+│   │   ├── buildplan_create_handler/ # BuildPlan生成（AI構築計画）
+│   │   ├── buildplan_step_handler/  # BuildPlanステップCRUD・修正・実行
 │   │   └── cadquery_runner/         # Step 5: Fargate CadQuery実行
 │   └── tests/            # pytest + moto テストスイート
 ├── cdk/
@@ -131,7 +137,7 @@ CloudFront CDN
 ├── frontend/
 │   ├── src/
 │   │   ├── App.tsx       # メインアプリ
-│   │   └── components/   # Viewer3D, UploadPanel, ChatPanel, HistoryPanel, VerificationPanel, LoginPanel
+│   │   └── components/   # Viewer3D, UploadPanel, ChatPanel, HistoryPanel, VerificationPanel, LoginPanel, BuildPlanPanel
 │   └── package.json
 └── docs/
     └── requirements.md   # 要件定義書 v1.1.0
