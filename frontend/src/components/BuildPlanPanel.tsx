@@ -107,6 +107,14 @@ export function BuildPlanPanel({
     }
   }, [plan?.steps]);
 
+  // Auto-create BuildPlan when navigated here with a session but no plan yet
+  useEffect(() => {
+    if (sessionId && !plan && !isCreating) {
+      handleCreatePlan();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
   // --- Create BuildPlan ---
   const handleCreatePlan = useCallback(async () => {
     setIsCreating(true);
@@ -309,34 +317,39 @@ export function BuildPlanPanel({
     [selectedStep, localSteps],
   );
 
-  // --- No plan yet: show create button ---
+  // --- No plan yet: show loading / retry ---
   if (!plan) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-4 p-6">
-        <div className="text-center">
-          <h2 className="text-lg font-semibold text-gray-800">段階的構築モード</h2>
-          <p className="mt-1 text-sm text-gray-500">
-            AIが図面を分析し、1ステップずつ3Dモデルを構築します
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={handleCreatePlan}
-          disabled={isCreating || !sessionId}
-          className="rounded-lg bg-indigo-600 px-6 py-2.5 text-sm font-medium text-white shadow-sm hover:bg-indigo-700 disabled:opacity-50"
-          aria-busy={isCreating}
-        >
-          {isCreating ? (
-            <span className="flex items-center gap-2">
-              <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
-              BuildPlan 作成中...
-            </span>
-          ) : (
-            "BuildPlan を作成"
-          )}
-        </button>
-        {error && (
-          <p className="text-sm text-red-600" role="alert">{error}</p>
+        {isCreating ? (
+          <div className="text-center">
+            <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-4 border-indigo-200 border-t-indigo-600" />
+            <h2 className="text-base font-semibold text-gray-800">BuildPlan を作成中...</h2>
+            <p className="mt-1 text-sm text-gray-500">
+              AI が図面を分析し、段階的構築プランを生成しています
+            </p>
+            {executionLog.length > 0 && (
+              <p className="mt-3 text-xs text-indigo-600">{executionLog[executionLog.length - 1]}</p>
+            )}
+          </div>
+        ) : (
+          <div className="text-center">
+            <h2 className="text-lg font-semibold text-gray-800">段階的構築モード</h2>
+            <p className="mt-1 text-sm text-gray-500">
+              AIが図面を分析し、1ステップずつ3Dモデルを構築します
+            </p>
+            {error && (
+              <p className="mt-3 text-sm text-red-600" role="alert">{error}</p>
+            )}
+            <button
+              type="button"
+              onClick={handleCreatePlan}
+              disabled={!sessionId}
+              className="mt-4 rounded-lg bg-indigo-600 px-6 py-2.5 text-sm font-medium text-white shadow-sm hover:bg-indigo-700 disabled:opacity-50"
+            >
+              再試行
+            </button>
+          </div>
         )}
       </div>
     );

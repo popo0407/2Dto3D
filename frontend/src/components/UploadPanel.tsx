@@ -10,9 +10,12 @@ interface UploadPanelProps {
     onComplete: (nodeId: string, url: string, reasoning?: string) => void,
     onError: (msg: string) => void,
   ) => Promise<void>;
+  onBuildPlanStart: (sessionId: string) => void;
   processingStep: string;
   processingProgress: number;
 }
+
+type ProcessingMode = "auto" | "buildplan";
 
 type UploadStatus = "idle" | "uploading" | "processing" | "error";
 
@@ -26,7 +29,7 @@ const PIPELINE_STEPS = [
   { key: "VALIDATING",   label: "品質検証中",    pct: 95 },
 ];
 
-export function UploadPanel({ idToken, onSessionCreated, onProcessingComplete, onProcessingStart, processingStep, processingProgress }: UploadPanelProps) {
+export function UploadPanel({ idToken, onSessionCreated, onProcessingComplete, onProcessingStart, onBuildPlanStart, processingStep, processingProgress }: UploadPanelProps) {
   const authHeader = { Authorization: `Bearer ${idToken}` };
 
   const [status, setStatus] = useState<UploadStatus>("idle");
@@ -34,6 +37,7 @@ export function UploadPanel({ idToken, onSessionCreated, onProcessingComplete, o
   const [files, setFiles] = useState<File[]>([]);
   const [error, setError] = useState("");
   const [sessionId, setSessionId] = useState("");
+  const [mode, setMode] = useState<ProcessingMode>("auto");
 
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const selected = Array.from(e.target.files ?? []);
@@ -96,6 +100,13 @@ export function UploadPanel({ idToken, onSessionCreated, onProcessingComplete, o
         if (!putRes.ok) throw new Error(`${file.name} のアップロードに失敗しました`);
       }
 
+      if (mode === "buildplan") {
+        // BuildPlan モード: パイプラインを起動せずに BuildPlan 画面へ遷移
+        setStatus("idle");
+        onBuildPlanStart(session.session_id);
+        return;
+      }
+
       // 3. WebSocket 接続を先に確立してからパイプラインを起動（競合状態防止）
       setStatus("processing");
       await onProcessingStart(
@@ -132,6 +143,49 @@ export function UploadPanel({ idToken, onSessionCreated, onProcessingComplete, o
         <h2 className="text-xl font-semibold text-gray-900">
           2D図面をアップロード
         </h2>
+
+        {/* Mode selector */}
+        <fieldset className="space-y-2">
+          <legend className="text-sm font-medium text-gray-700">生成モード</legend>
+          <label
+            className={`flex cursor-pointer items-start gap-3 rounded-lg border-2 p-3 transition-colors ${
+              mode === "auto" ? "border-blue-500 bg-blue-50" : "border-gray-200 hover:border-gray-300"
+            }`}
+          >
+            <input
+              type="radio"
+              name="mode"
+              value="auto"
+              checked={mode === "auto"}
+              onChange={() => setMode("auto")}
+              className="mt-0.5 accent-blue-600"
+              disabled={status === "uploading" || status === "processing"}
+            />
+            <div>
+              <p className="text-sm font-semibold text-gray-800">自動生成</p>
+              <p className="text-xs text-gray-500">AIが図面を解析し3Dモデルを自動で一括生成します</p>
+            </div>
+          </label>
+          <label
+            className={`flex cursor-pointer items-start gap-3 rounded-lg border-2 p-3 transition-colors ${
+              mode === "buildplan" ? "border-indigo-500 bg-indigo-50" : "border-gray-200 hover:border-gray-300"
+            }`}
+          >
+            <input
+              type="radio"
+              name="mode"
+              value="buildplan"
+              checked={mode === "buildplan"}
+              onChange={() => setMode("buildplan")}
+              className="mt-0.5 accent-indigo-600"
+              disabled={status === "uploading" || status === "processing"}
+            />
+            <div>
+              <p className="text-sm font-semibold text-gray-800">段階的構築</p>
+              <p className="text-xs text-gray-500">AIが構築手順（BuildPlan）を生成し、各ステップをパラメータ編集・チャットで修正しながら構築します</p>
+            </div>
+          </label>
+        </fieldset>
 
         <div>
           <label htmlFor="project-name" className="mb-1 block text-sm font-medium text-gray-700">
@@ -234,13 +288,17 @@ export function UploadPanel({ idToken, onSessionCreated, onProcessingComplete, o
         <button
           type="submit"
           disabled={status === "uploading" || status === "processing"}
-          className="w-full rounded-lg bg-blue-600 py-2.5 text-sm font-medium text-white hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
+          className={`w-full rounded-lg py-2.5 text-sm font-medium text-white disabled:bg-gray-400 disabled:cursor-not-allowed ${
+            mode === "buildplan" ? "bg-indigo-600 hover:bg-indigo-700" : "bg-blue-600 hover:bg-blue-700"
+          }`}
         >
           {status === "uploading"
             ? "アップロード中..."
             : status === "processing"
               ? "処理中..."
-              : "3Dモデルを生成"}
+              : mode === "buildplan"
+                ? "段階的構築を開始"
+                : "3Dモデルを自動生成"}
         </button>
       </form>
     </div>

@@ -187,6 +187,11 @@ export default function App() {
     [handleProcessingStart],
   );
 
+  const handleBuildPlanStart = useCallback((sid: string) => {
+    setSessionId(sid);
+    setView("buildplan");
+  }, []);
+
   const handleLoginSuccess = async () => {
     const token = await getIdToken();
     setIdToken(token ?? "");
@@ -334,6 +339,7 @@ export default function App() {
             onSessionCreated={handleSessionCreated}
             onProcessingComplete={handleProcessingComplete}
             onProcessingStart={handleProcessingStart}
+            onBuildPlanStart={handleBuildPlanStart}
             processingStep={processingStep}
             processingProgress={processingProgress}
           />
