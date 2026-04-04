@@ -5,10 +5,11 @@ import { ChatPanel } from "./components/ChatPanel";
 import { HistoryPanel } from "./components/HistoryPanel";
 import { LoginPanel } from "./components/LoginPanel";
 import { VerificationPanel, ElementPreview, type VerificationElement } from "./components/VerificationPanel";
+import { BuildPlanPanel, type BuildPlan } from "./components/BuildPlanPanel";
 import { getIdToken, signOut } from "./auth";
 import { WS_URL, API_BASE } from "./config";
 
-type AppView = "upload" | "viewer";
+type AppView = "upload" | "viewer" | "buildplan";
 
 // WebSocket から届く通知メッセージの型
 interface WsNotifyMessage {
@@ -69,6 +70,9 @@ export default function App() {
   const [currentVerifyIteration, setCurrentVerifyIteration] = useState(0);
   const [highlightedElement, setHighlightedElement] = useState<string | null>(null);
   const [isBuildingFinal, setIsBuildingFinal] = useState(false);
+
+  // BuildPlan mode state
+  const [buildPlan, setBuildPlan] = useState<BuildPlan | null>(null);
 
   // WebSocket ref（セッションをまたいで保持）
   const wsRef = useRef<WebSocket | null>(null);
@@ -207,6 +211,7 @@ export default function App() {
     setIsBuildingFinal(false);
     setTotalInputTokens(0);
     setTotalOutputTokens(0);
+    setBuildPlan(null);
     setView("upload");
   };
 
@@ -290,6 +295,19 @@ export default function App() {
           >
             3Dビューア
           </button>
+          <button
+            type="button"
+            onClick={() => setView("buildplan")}
+            className={`rounded-md px-3 py-1.5 text-sm font-medium ${
+              view === "buildplan"
+                ? "bg-indigo-100 text-indigo-700"
+                : "text-gray-600 hover:bg-gray-100"
+            }`}
+            disabled={!sessionId}
+            aria-current={view === "buildplan" ? "page" : undefined}
+          >
+            段階的構築
+          </button>
           {/* Token usage display */}
           {(totalInputTokens > 0 || totalOutputTokens > 0) && (
             <div className="ml-4 flex items-center gap-2 rounded-md bg-gray-100 px-3 py-1 text-xs text-gray-600" title="累計トークン使用量">
@@ -318,6 +336,22 @@ export default function App() {
             onProcessingStart={handleProcessingStart}
             processingStep={processingStep}
             processingProgress={processingProgress}
+          />
+        ) : view === "buildplan" ? (
+          <BuildPlanPanel
+            sessionId={sessionId}
+            idToken={idToken}
+            plan={buildPlan}
+            onPlanCreated={setBuildPlan}
+            onExecutionComplete={(url, nid) => {
+              setNodeId(nid);
+              setGltfUrl(url);
+              setView("viewer");
+            }}
+            onTokenUsage={(inp, out) => {
+              setTotalInputTokens((prev) => prev + inp);
+              setTotalOutputTokens((prev) => prev + out);
+            }}
           />
         ) : (
           <>
