@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { API_BASE } from "../config";
+import { StepPreview3D } from "./StepPreview3D";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -535,7 +536,7 @@ export function BuildPlanPanel({
 
       {/* Step list */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
-        <div className="w-1/2 overflow-y-auto border-r" role="list" aria-label="構築ステップ一覧">
+        <div className="w-52 shrink-0 overflow-y-auto border-r" role="list" aria-label="構築ステップ一覧">
           {localSteps.map((step) => {
             const isSelected = step.step_seq === selectedStep;
             const isChecked = checkedSteps.has(step.step_seq);
@@ -593,8 +594,17 @@ export function BuildPlanPanel({
           })}
         </div>
 
+        {/* 3D Preview (center) */}
+        <div className="relative flex-1 min-w-0 border-r">
+          <StepPreview3D
+            step={selectedStepData ?? null}
+            planId={plan.plan_id}
+            idToken={idToken}
+          />
+        </div>
+
         {/* Detail / Edit panel */}
-        <div className="flex w-1/2 flex-col overflow-y-auto">
+        <div className="flex w-64 shrink-0 flex-col overflow-y-auto">
           {checkedSteps.size > 0 ? (
             <div className="flex flex-col gap-3 p-3">
               {/* Batch header */}
