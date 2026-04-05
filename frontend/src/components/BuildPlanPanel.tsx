@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { API_BASE } from "../config";
 import { StepPreview3D } from "./StepPreview3D";
 
@@ -102,12 +102,29 @@ export function BuildPlanPanel({
   const [checkedSteps, setCheckedSteps] = useState<Set<string>>(new Set());
   const [batchParams, setBatchParams] = useState<Record<string, Record<string, string>>>({});
   const [batchInstruction, setBatchInstruction] = useState("");
+  const [showExecConfirm, setShowExecConfirm] = useState(false);
+  const [execElapsed, setExecElapsed] = useState(0);
   const chatInputRef = useRef<HTMLInputElement>(null);
   const pollingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const execTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Cleanup polling timer on unmount
+  // Auto-detect starting step: earliest modified → earliest non-completed → "0001"
+  const autoFromStep = useMemo(
+    () =>
+      localSteps.find((s) => s.status === "modified")?.step_seq ??
+      localSteps.find((s) => s.status !== "completed")?.step_seq ??
+      "0001",
+    [localSteps],
+  );
+  const hasModified = useMemo(
+    () => localSteps.some((s) => s.status === "modified"),
+    [localSteps],
+  );
+
+  // Cleanup timers on unmount
   useEffect(() => () => {
     if (pollingTimerRef.current) clearTimeout(pollingTimerRef.current);
+    if (execTimerRef.current) clearInterval(execTimerRef.current);
   }, []);
 
   useEffect(() => {
@@ -213,52 +230,52 @@ export function BuildPlanPanel({
     }
   }, [sessionId, idToken, onPlanCreated, startPolling]);
 
-  // --- Execute Plan ---
-  const handleExecute = useCallback(
-    async (fromStep = "0001") => {
-      if (!plan) return;
-      setIsExecuting(true);
-      setError(null);
-      setExecutionLog((prev) => [...prev, `Step ${fromStep} から実行開始...`]);
-      try {
-        const res = await fetch(`${API_BASE}/build-plans/${plan.plan_id}/execute`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${idToken}`,
-          },
-          body: JSON.stringify({ from_step: fromStep }),
-        });
-        if (!res.ok) {
-          const data = await res.json();
-          throw new Error(data.error ?? "実行に失敗");
-        }
+  // --- Execute Plan (with confirmation) ---
+  const handleConfirmExecute = useCallback(async () => {
+    if (!plan) return;
+    setShowExecConfirm(false);
+    setIsExecuting(true);
+    setExecElapsed(0);
+    setError(null);
+    execTimerRef.current = setInterval(() => setExecElapsed((p) => p + 1), 1000);
+    setExecutionLog((prev) => [...prev, `Step ${autoFromStep} から実行開始...`]);
+    try {
+      const res = await fetch(`${API_BASE}/build-plans/${plan.plan_id}/execute`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify({ from_step: autoFromStep }),
+      });
+      if (!res.ok) {
         const data = await res.json();
-        // Update local step statuses
-        if (data.results) {
-          setLocalSteps((prev) =>
-            prev.map((s) => {
-              const result = data.results.find((r: { step_seq: string }) => r.step_seq === s.step_seq);
-              return result ? { ...s, status: result.status } : s;
-            }),
-          );
-        }
-        setExecutionLog((prev) => [
-          ...prev,
-          `実行完了: ${data.executed_count} ステップ`,
-        ]);
-        if (data.gltf_url) {
-          onExecutionComplete(data.gltf_url, plan.node_id);
-        }
-      } catch (e) {
-        setError(String(e));
-        setExecutionLog((prev) => [...prev, `実行エラー: ${e}`]);
-      } finally {
-        setIsExecuting(false);
+        throw new Error(data.error ?? "実行に失敗");
       }
-    },
-    [plan, idToken, onExecutionComplete],
-  );
+      const data = await res.json();
+      if (data.results) {
+        setLocalSteps((prev) =>
+          prev.map((s) => {
+            const result = data.results.find((r: { step_seq: string }) => r.step_seq === s.step_seq);
+            return result ? { ...s, status: result.status } : s;
+          }),
+        );
+      }
+      setExecutionLog((prev) => [...prev, `実行完了: ${data.executed_count} ステップ`]);
+      if (data.gltf_url) {
+        onExecutionComplete(data.gltf_url, plan.node_id);
+      }
+    } catch (e) {
+      setError(String(e));
+      setExecutionLog((prev) => [...prev, `実行エラー: ${e}`]);
+    } finally {
+      if (execTimerRef.current) {
+        clearInterval(execTimerRef.current);
+        execTimerRef.current = null;
+      }
+      setIsExecuting(false);
+    }
+  }, [plan, autoFromStep, idToken, onExecutionComplete]);
 
   // --- Modify Step ---
   const handleModifyByParams = useCallback(async () => {
@@ -504,32 +521,85 @@ export function BuildPlanPanel({
   const selectedStepData = localSteps.find((s) => s.step_seq === selectedStep);
 
   return (
-    <div className="flex flex-1 flex-col overflow-hidden">
+    <div className="relative flex flex-1 flex-col overflow-hidden">
+      {/* Confirmation dialog */}
+      {showExecConfirm && (
+        <div
+          className="absolute inset-0 z-50 flex items-center justify-center bg-black/60"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="w-80 rounded-2xl bg-white p-6 shadow-2xl">
+            <h3 className="text-sm font-bold text-gray-900">3D モデルを生成しますか？</h3>
+            <p className="mt-2 text-xs text-gray-600">
+              {hasModified ? (
+                <>
+                  Step{" "}
+                  <span className="font-semibold text-amber-600">{autoFromStep}</span>{" "}
+                  以降を再実行します（修正済みステップを検出しました）。
+                </>
+              ) : (
+                <>
+                  Step{" "}
+                  <span className="font-semibold text-gray-800">{autoFromStep}</span>{" "}
+                  から実行します。
+                </>
+              )}
+            </p>
+            <p className="mt-1 text-xs text-gray-500">
+              CadQuery でステップを順番に処理します。形状の複雑さによって数十秒〜数分かかる場合があります。
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowExecConfirm(false)}
+                className="rounded-lg border px-4 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+              >
+                キャンセル
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmExecute}
+                className="rounded-lg bg-green-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-green-700"
+              >
+                実行する
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Execution progress overlay */}
+      {isExecuting && (
+        <div className="absolute inset-0 z-40 flex flex-col items-center justify-center bg-gray-950/85 backdrop-blur-sm">
+          <div className="h-10 w-10 animate-spin rounded-full border-4 border-green-800 border-t-green-400" />
+          <p className="mt-4 text-sm font-semibold text-white">3D モデル生成中...</p>
+          <p className="mt-1 text-xs text-gray-400">CadQuery がステップを順番に処理しています</p>
+          <p className="mt-1 font-mono text-xs text-green-400">経過: {execElapsed} 秒</p>
+          {executionLog.length > 0 && (
+            <p className="mt-2 max-w-xs truncate text-center text-[10px] text-gray-500">
+              {executionLog[executionLog.length - 1]}
+            </p>
+          )}
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex items-center gap-2 border-b bg-indigo-50 px-4 py-2">
         <span className="text-xs font-semibold text-indigo-700">
           BuildPlan ({plan.total_steps} ステップ)
         </span>
-        <div className="ml-auto flex gap-2">
+        <div className="ml-auto flex items-center gap-2">
+          {hasModified && (
+            <span className="text-[10px] text-amber-600">✎ Step {autoFromStep} から再実行</span>
+          )}
           <button
             type="button"
-            onClick={() =>
-              handleExecute(
-                checkedSteps.size > 0
-                  ? Array.from(checkedSteps).sort()[0]
-                  : (selectedStep ?? "0001"),
-              )
-            }
-            disabled={isExecuting}
+            onClick={() => setShowExecConfirm(true)}
+            disabled={isExecuting || localSteps.length === 0}
             className="rounded bg-green-600 px-3 py-1 text-xs font-medium text-white hover:bg-green-700 disabled:opacity-50"
           >
-            {isExecuting
-              ? "実行中..."
-              : checkedSteps.size > 0
-              ? `Step ${Array.from(checkedSteps).sort()[0]} から実行`
-              : selectedStep
-              ? `Step ${selectedStep} から実行`
-              : "全実行"}
+            3D 生成
           </button>
         </div>
       </div>
@@ -572,6 +642,9 @@ export function BuildPlanPanel({
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-1.5">
                       <span className="text-[10px] font-mono text-gray-400">{step.step_seq}</span>
+                      {step.step_seq === autoFromStep && (
+                        <span className="rounded bg-green-100 px-1 text-[9px] font-bold text-green-700">▶</span>
+                      )}
                       <span className="rounded bg-gray-100 px-1 text-[10px] text-gray-500">
                         {STEP_TYPE_LABEL[step.step_type] ?? step.step_type}
                       </span>
