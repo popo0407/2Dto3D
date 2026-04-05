@@ -527,3 +527,44 @@ nodes_table.update_item(
 - WebSocket API ID・execute-api 権限は Lambda 作成より後に付与する（CDK コンストラクタの実行順序に注意）
 - `ProcessingMode` のような未使用の型を残さないよう、TypeScript `--noEmit` チェックを習慣付ける
 - ストリーミング API のメタデータ（トークン数）は `message_start` イベント (`input_tokens`) と `message_delta` イベント (`output_tokens`) から取得できるし・コスト削減）
+---
+
+## 2026-04 BuildPlan 504 Gateway Timeout 修正（非同期アーキテクチャ導入）
+
+### 発生した問題
+`POST /sessions/{id}/build-plans` で **504 Gateway Timeout** が頻発。
+Bedrock のマルチモーダル呼び出し（`jp.anthropic.claude-sonnet-4-6`, `max_tokens=16384`）が 1〜2 分かかるのに対し、API Gateway の応答タイムアウトが 29 秒で固定されているため。
+
+### 根本原因
+
+| 問題 | 原因 |
+|------|------|
+| `buildplan_create_handler` が Bedrock を同期呼び出し | Lambda 単体は 900 秒まで実行可能だが、API GW は 29 秒でコネクションを切断する |
+| modify も同様の問題 | `buildplan_step_handler` の自然言語修正も Bedrock を同期呼び出ししていた |
+
+### 対処（非同期 Lambda パターン）
+
+| 変更 | ファイル | 内容 |
+|------|----------|------|
+| kick-off ハンドラーに縮小 | `buildplan_create_handler/index.py` | DynamoDB にプランレコード（status=creating）を作り、worker を `InvocationType="Event"` で非同期起動して 202 を即時返す |
+| 新規 worker ハンドラー | `buildplan_worker_handler/index.py` | `action=create` / `action=modify` の 2 アクションを処理。Bedrock 呼び出し・ステップ保存・status 更新はすべてここで実行 |
+| GET plan + async modify | `buildplan_step_handler/index.py` | `GET /build-plans/{plan_id}` ルート追加（ポーリング用）。modify も worker 非同期起動に変更（202 返却） |
+| CDK: worker fn + 権限 | `lambda_stack.py` | `buildplan_worker_fn` 追加（900 s / 1024 MB / Bedrock 権限）。create/step fn に `lambda:InvokeFunction` 権限を付与、`BUILDPLAN_WORKER_FUNCTION_NAME` env var を追加。`GET /build-plans/{plan_id}` API ルートも追加 |
+| フロントエンド: ポーリング | `BuildPlanPanel.tsx` | create・modify の 202 応答後、`GET /build-plans/{plan_id}` を 3 秒ごとにポーリング。`plan_status=planned` になったらステップを取得して画面更新。アンマウント時に `clearTimeout` でクリーンアップ |
+
+### アーキテクチャフロー
+```
+POST /build-plans  →  create_handler (202 即時返却)
+                           ↓ InvocationType="Event"
+                    worker_handler (最大 900 秒で AI 処理)
+                           ↓ DynamoDB plan_status=planned
+Frontend polling (3s) ← GET /build-plans/{plan_id}
+     → status=planned → GET /build-plans/{plan_id}/steps
+```
+
+### 改善策・再発防止
+- API Gateway のタイムアウト（29 秒）を超える可能性がある処理は **kick-off → worker 非同期** パターンを採用する
+- worker は `InvocationType="Event"` で呼び出す。呼び出し側は返り値を使わない
+- フロントエンドでのポーリングは `useRef` + `setTimeout` で実装し、コンポーネントアンマウント時に必ず `clearTimeout` する（`setInterval` は不使用）
+- worker が失敗した場合は `plan_status=failed` + `reasoning` にエラーメッセージを格納し、フロントエンドがエラー表示できるようにする。worker の呼び出し元には例外を伝播しない（`Event` 呼び出しは返値なし）
+- CDK で `lambda.grant_invoke(caller_fn)` を使うと必要最小限の IAM ポリシーを自動生成できる。手動で `lambda:InvokeFunction` を記述する必要はない
