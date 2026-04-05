@@ -282,10 +282,20 @@ export function BuildPlanPanel({
       }
       const { plan_id: planId } = await res.json();
       // Backend returns 202 — poll until status = "planned"
+      const targetStepSeq = selectedStep; // capture for closure
       startPolling(
         planId,
         (_planData, steps) => {
           setLocalSteps(steps);
+          // Reset editingParams to reflect the new persisted values
+          const updated = steps.find((s) => s.step_seq === targetStepSeq);
+          if (updated) {
+            const newParams: Record<string, string> = {};
+            for (const [k, v] of Object.entries(updated.parameters)) {
+              newParams[k] = String((v as StepParameter).value);
+            }
+            setEditingParams(newParams);
+          }
           setExecutionLog((prev) => [...prev, `修正完了: ${steps.length} ステップ更新`]);
           setIsModifying(false);
         },

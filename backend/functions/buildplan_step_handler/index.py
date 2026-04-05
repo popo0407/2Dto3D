@@ -209,6 +209,9 @@ def _modify_step(plan_id: str, step_seq: str, body: dict) -> dict:
             "session_id": session_id,
             "step_seq": step_seq,
             "instruction": instruction,
+            # Pass explicit param values so the worker can guarantee them
+            # even if the AI forgets to update the parameters field.
+            "explicit_params": new_params if modification_type == "parameter" else {},
         }).encode(),
     )
 

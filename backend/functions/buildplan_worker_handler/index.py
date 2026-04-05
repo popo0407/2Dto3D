@@ -266,6 +266,9 @@ def _handle_modify(event: dict) -> None:
     session_id = event["session_id"]
     step_seq = event["step_seq"]
     instruction = event.get("instruction", "")
+    # Explicit param overrides supplied by the user (type="parameter" path).
+    # These are applied on top of the AI response so user values always win.
+    explicit_params: dict = event.get("explicit_params", {})
 
     plans_table = dynamodb.Table(BUILD_PLANS_TABLE)
     steps_table = dynamodb.Table(BUILD_STEPS_TABLE)
@@ -307,6 +310,22 @@ def _handle_modify(event: dict) -> None:
 
         if not modified_steps:
             raise ValueError("AI returned no modified steps")
+
+        # Apply explicit parameter overrides to the target step.
+        # The AI may correctly regenerate cq_code but leave the `parameters`
+        # dict unchanged.  Merging here guarantees the UI shows the user's values.
+        if explicit_params:
+            for mod_step in modified_steps:
+                if mod_step.get("step_seq") == step_seq:
+                    params = mod_step.get("parameters", {})
+                    for key, val in explicit_params.items():
+                        if isinstance(val, dict):
+                            params[key] = {**val, "source": "user", "confidence": 1.0}
+                        else:
+                            params[key] = {"value": val, "unit": "mm",
+                                           "source": "user", "confidence": 1.0}
+                    mod_step["parameters"] = params
+                    break
 
         # Update modified steps in DynamoDB
         now = int(time.time())
