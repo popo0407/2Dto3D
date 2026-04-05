@@ -98,6 +98,9 @@ export function BuildPlanPanel({
   const [error, setError] = useState<string | null>(null);
   const [executionLog, setExecutionLog] = useState<string[]>([]);
   const [localSteps, setLocalSteps] = useState<BuildStep[]>([]);
+  const [checkedSteps, setCheckedSteps] = useState<Set<string>>(new Set());
+  const [batchParams, setBatchParams] = useState<Record<string, Record<string, string>>>({});
+  const [batchInstruction, setBatchInstruction] = useState("");
   const chatInputRef = useRef<HTMLInputElement>(null);
   const pollingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -368,6 +371,96 @@ export function BuildPlanPanel({
     [selectedStep, localSteps],
   );
 
+  // --- Toggle batch check ---
+  const toggleCheck = useCallback(
+    (stepSeq: string) => {
+      setCheckedSteps((prev) => {
+        const next = new Set(prev);
+        if (next.has(stepSeq)) {
+          next.delete(stepSeq);
+          setBatchParams((p) => {
+            const q = { ...p };
+            delete q[stepSeq];
+            return q;
+          });
+        } else {
+          next.add(stepSeq);
+          const step = localSteps.find((s) => s.step_seq === stepSeq);
+          if (step) {
+            const params: Record<string, string> = {};
+            for (const [k, v] of Object.entries(step.parameters)) {
+              params[k] = String((v as StepParameter).value);
+            }
+            setBatchParams((p) => ({ ...p, [stepSeq]: params }));
+          }
+        }
+        return next;
+      });
+    },
+    [localSteps],
+  );
+
+  // --- Batch modify ---
+  const handleBatchModify = useCallback(async () => {
+    if (!plan || (checkedSteps.size === 0 && !batchInstruction.trim())) return;
+    setIsModifying(true);
+    setError(null);
+    setExecutionLog((prev) => [...prev, `${checkedSteps.size} ステップを一括修正中...`]);
+
+    const modifications = Array.from(checkedSteps).map((seq) => {
+      const rawParams = batchParams[seq] ?? {};
+      if (Object.keys(rawParams).length === 0) return { step_seq: seq };
+      const params: Record<string, { value: number | string; unit: string; source: string; confidence: number }> = {};
+      for (const [key, val] of Object.entries(rawParams)) {
+        const numVal = parseFloat(val);
+        params[key] = { value: isNaN(numVal) ? val : numVal, unit: "mm", source: "user", confidence: 1.0 };
+      }
+      return { step_seq: seq, parameters: params };
+    });
+
+    try {
+      const res = await fetch(`${API_BASE}/build-plans/${plan.plan_id}/modify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
+        body: JSON.stringify({ modifications, instruction: batchInstruction }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error ?? "修正に失敗");
+      }
+      const { plan_id: planId } = await res.json();
+      const seqsAtSubmit = new Set(checkedSteps);
+      startPolling(
+        planId,
+        (_planData, steps) => {
+          setLocalSteps(steps);
+          const newBatchParams: Record<string, Record<string, string>> = {};
+          for (const seq of seqsAtSubmit) {
+            const updated = steps.find((s) => s.step_seq === seq);
+            if (updated) {
+              const p: Record<string, string> = {};
+              for (const [k, v] of Object.entries(updated.parameters)) {
+                p[k] = String((v as StepParameter).value);
+              }
+              newBatchParams[seq] = p;
+            }
+          }
+          setBatchParams(newBatchParams);
+          setBatchInstruction("");
+          setExecutionLog((prev) => [...prev, `一括修正完了: ${steps.length} ステップ更新`]);
+          setIsModifying(false);
+        },
+        (msg) => {
+          setError(msg);
+          setIsModifying(false);
+        },
+      );
+    } catch (e) {
+      setError(String(e));
+      setIsModifying(false);
+    }
+  }, [plan, checkedSteps, batchParams, batchInstruction, idToken, startPolling]);
+
   // --- No plan yet: show loading / retry ---
   if (!plan) {
     return (
@@ -419,11 +512,23 @@ export function BuildPlanPanel({
         <div className="ml-auto flex gap-2">
           <button
             type="button"
-            onClick={() => handleExecute(selectedStep ?? "0001")}
+            onClick={() =>
+              handleExecute(
+                checkedSteps.size > 0
+                  ? Array.from(checkedSteps).sort()[0]
+                  : (selectedStep ?? "0001"),
+              )
+            }
             disabled={isExecuting}
             className="rounded bg-green-600 px-3 py-1 text-xs font-medium text-white hover:bg-green-700 disabled:opacity-50"
           >
-            {isExecuting ? "実行中..." : selectedStep ? `Step ${selectedStep} から実行` : "全実行"}
+            {isExecuting
+              ? "実行中..."
+              : checkedSteps.size > 0
+              ? `Step ${Array.from(checkedSteps).sort()[0]} から実行`
+              : selectedStep
+              ? `Step ${selectedStep} から実行`
+              : "全実行"}
           </button>
         </div>
       </div>
@@ -433,47 +538,136 @@ export function BuildPlanPanel({
         <div className="w-1/2 overflow-y-auto border-r" role="list" aria-label="構築ステップ一覧">
           {localSteps.map((step) => {
             const isSelected = step.step_seq === selectedStep;
+            const isChecked = checkedSteps.has(step.step_seq);
             return (
-              <button
+              <div
                 key={step.step_seq}
-                type="button"
-                role="listitem"
-                onClick={() => handleStepClick(step.step_seq)}
-                className={`flex w-full items-start gap-2 border-b px-3 py-2 text-left transition-colors ${
-                  isSelected ? "bg-indigo-50 ring-1 ring-indigo-300" : "hover:bg-gray-50"
+                className={`flex items-stretch border-b transition-colors ${
+                  isChecked
+                    ? "bg-violet-50 ring-1 ring-inset ring-violet-300"
+                    : isSelected
+                    ? "bg-indigo-50 ring-1 ring-inset ring-indigo-300"
+                    : "hover:bg-gray-50"
                 }`}
-                aria-selected={isSelected}
               >
-                <span className={`mt-0.5 text-sm font-bold ${STATUS_COLOR[step.status] ?? "text-gray-400"}`}>
-                  {STATUS_ICON[step.status] ?? "?"}
-                </span>
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-[10px] font-mono text-gray-400">{step.step_seq}</span>
-                    <span className="rounded bg-gray-100 px-1 text-[10px] text-gray-500">
-                      {STEP_TYPE_LABEL[step.step_type] ?? step.step_type}
-                    </span>
-                    {step.group_id && (
-                      <span className="rounded bg-blue-50 px-1 text-[10px] text-blue-500">
-                        {step.group_id}
+                <label className="flex shrink-0 cursor-pointer items-start px-2 pt-2.5">
+                  <input
+                    type="checkbox"
+                    checked={isChecked}
+                    onChange={() => toggleCheck(step.step_seq)}
+                    className="h-3.5 w-3.5 cursor-pointer rounded border-gray-300 text-violet-600 focus:ring-violet-400"
+                  />
+                </label>
+                <button
+                  type="button"
+                  role="listitem"
+                  onClick={() => handleStepClick(step.step_seq)}
+                  className="flex flex-1 items-start gap-2 py-2 pr-3 text-left"
+                  aria-selected={isSelected}
+                >
+                  <span className={`mt-0.5 text-sm font-bold ${STATUS_COLOR[step.status] ?? "text-gray-400"}`}>
+                    {STATUS_ICON[step.status] ?? "?"}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] font-mono text-gray-400">{step.step_seq}</span>
+                      <span className="rounded bg-gray-100 px-1 text-[10px] text-gray-500">
+                        {STEP_TYPE_LABEL[step.step_type] ?? step.step_type}
+                      </span>
+                      {step.group_id && (
+                        <span className="rounded bg-blue-50 px-1 text-[10px] text-blue-500">
+                          {step.group_id}
+                        </span>
+                      )}
+                    </div>
+                    <p className="truncate text-xs font-medium text-gray-800">{step.step_name}</p>
+                    {step.confidence < 0.85 && (
+                      <span className="text-[10px] text-amber-600">
+                        確度: {(step.confidence * 100).toFixed(0)}%
                       </span>
                     )}
                   </div>
-                  <p className="truncate text-xs font-medium text-gray-800">{step.step_name}</p>
-                  {step.confidence < 0.85 && (
-                    <span className="text-[10px] text-amber-600">
-                      確度: {(step.confidence * 100).toFixed(0)}%
-                    </span>
-                  )}
-                </div>
-              </button>
+                </button>
+              </div>
             );
           })}
         </div>
 
         {/* Detail / Edit panel */}
         <div className="flex w-1/2 flex-col overflow-y-auto">
-          {selectedStepData ? (
+          {checkedSteps.size > 0 ? (
+            <div className="flex flex-col gap-3 p-3">
+              {/* Batch header */}
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-semibold text-violet-700">
+                  {checkedSteps.size} ステップを一括修正
+                </span>
+                <button
+                  type="button"
+                  onClick={() => { setCheckedSteps(new Set()); setBatchParams({}); setBatchInstruction(""); }}
+                  className="text-xs text-gray-400 hover:text-gray-600"
+                >
+                  選択クリア
+                </button>
+              </div>
+              {/* Per-step parameter editors */}
+              {Array.from(checkedSteps).sort().map((seq) => {
+                const step = localSteps.find((s) => s.step_seq === seq);
+                if (!step) return null;
+                return (
+                  <details key={seq} open className="rounded border">
+                    <summary className="cursor-pointer bg-gray-50 px-2 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-100">
+                      {seq} · {step.step_name}
+                    </summary>
+                    <div className="space-y-1.5 p-2">
+                      {Object.entries(step.parameters).map(([key, val]) => {
+                        const p = val as StepParameter;
+                        return (
+                          <label key={key} className="flex items-center gap-2 text-xs">
+                            <span className="w-24 truncate font-medium text-gray-700" title={key}>{key}</span>
+                            <input
+                              type="text"
+                              value={batchParams[seq]?.[key] ?? String(p.value)}
+                              onChange={(e) =>
+                                setBatchParams((prev) => ({
+                                  ...prev,
+                                  [seq]: { ...(prev[seq] ?? {}), [key]: e.target.value },
+                                }))
+                              }
+                              className="flex-1 rounded border border-gray-300 px-2 py-1 text-xs focus:border-violet-400 focus:ring-1 focus:ring-violet-400"
+                              disabled={isModifying}
+                            />
+                            <span className="w-8 text-[10px] text-gray-400">{p.unit}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </details>
+                );
+              })}
+              {/* NL instruction */}
+              <div className="rounded border p-2">
+                <p className="mb-1 text-[10px] font-semibold text-gray-500">自然言語での追加指示（任意）</p>
+                <textarea
+                  value={batchInstruction}
+                  onChange={(e) => setBatchInstruction(e.target.value)}
+                  placeholder="例: 全ての穴を同じ直径にそろえてください"
+                  className="w-full rounded border border-gray-300 px-2 py-1.5 text-xs focus:border-violet-400 focus:ring-1 focus:ring-violet-400"
+                  rows={2}
+                  disabled={isModifying}
+                />
+              </div>
+              {/* Submit */}
+              <button
+                type="button"
+                onClick={handleBatchModify}
+                disabled={isModifying}
+                className="w-full rounded bg-violet-600 py-2 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-50"
+              >
+                {isModifying ? "AI修正中..." : `${checkedSteps.size} ステップを一括修正`}
+              </button>
+            </div>
+          ) : selectedStepData ? (
             <div className="flex flex-col gap-3 p-3">
               {/* Step info */}
               <div>
@@ -560,8 +754,8 @@ export function BuildPlanPanel({
               </details>
             </div>
           ) : (
-            <div className="flex flex-1 items-center justify-center p-4 text-xs text-gray-400">
-              ステップを選択してください
+            <div className="flex flex-1 items-center justify-center p-4 text-center text-xs text-gray-400">
+              ステップをクリックして詳細表示<br />チェックして一括修正
             </div>
           )}
         </div>

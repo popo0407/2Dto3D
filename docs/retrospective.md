@@ -568,3 +568,55 @@ Frontend polling (3s) ← GET /build-plans/{plan_id}
 - フロントエンドでのポーリングは `useRef` + `setTimeout` で実装し、コンポーネントアンマウント時に必ず `clearTimeout` する（`setInterval` は不使用）
 - worker が失敗した場合は `plan_status=failed` + `reasoning` にエラーメッセージを格納し、フロントエンドがエラー表示できるようにする。worker の呼び出し元には例外を伝播しない（`Event` 呼び出しは返値なし）
 - CDK で `lambda.grant_invoke(caller_fn)` を使うと必要最小限の IAM ポリシーを自動生成できる。手動で `lambda:InvokeFunction` を記述する必要はない
+
+---
+
+## 2026-04 BuildPlan 複数ステップ一括修正機能実装
+
+### 実施内容
+- パラメータ修正・自然言語修正の両方に対応した**複数ステップ一括修正**を実装
+- 単一ステップ修正でパラメータ値が元に戻るバグを修正
+
+### 発生した問題と対処
+
+| 問題 | 原因 | 対処 |
+|------|------|------|
+| 修正後にパラメータ値が元に戻る | worker の AI 応答に古い値が含まれ、フロントエンドがポーリング後に AI 値で上書きしていた | worker で `explicit_params` を AI 応答の parameters にオーバーライドしてから DynamoDB に保存。フロントエンドは取得した最新値で `editingParams` を再初期化 |
+| 結合ルート `/modify` が CDK に登録されていなかった | step_handler コード更新後も CDK 側のリソース定義に新ルートが未追加 | `bp_plan_modify_resource = bp_plan_resource.add_resource("modify")` を追加し CDK 再デプロイ |
+
+### 実装内容
+
+| 変更 | ファイル | 内容 |
+|------|----------|------|
+| MODIFY_PROMPT 更新 | `buildplan_worker_handler/index.py` | `{target_steps_text}` プレースホルダーで複数ステップの修正意図をリスト形式でプロンプトに渡せるよう変更 |
+| `_handle_modify` 更新 | `buildplan_worker_handler/index.py` | `modifications` リスト（`step_seq`, `parameters?`の配列）を受け付け、各エントリの explicit_params を AI 結果に上書きしてから保存 |
+| `_batch_modify` 追加 | `buildplan_step_handler/index.py` | `POST /build-plans/{plan_id}/modify` ルート実装。`modifications` 配列 + `instruction` を受け取り worker を非同期起動して 202 返却 |
+| `_modify_step` 簡素化 | `buildplan_step_handler/index.py` | 単一ステップ修正を `_batch_modify` に委譲（重複コード削除） |
+| CDK ルート追加 | `lambda_stack.py` | `POST /build-plans/{plan_id}/modify` → `buildplan_step_fn` |
+| チェックボックス UI | `BuildPlanPanel.tsx` | ステップリストに checkbox を追加。複数チェック時に右パネルが一括修正パネルに切り替わる |
+| `toggleCheck` / `handleBatchModify` | `BuildPlanPanel.tsx` | チェック状態管理 + 一括修正送信・ポーリングロジック |
+
+### API 仕様（新規）
+```
+POST /build-plans/{plan_id}/modify
+Body: {
+  "modifications": [
+    { "step_seq": "0002", "parameters": { "diameter": { "value": 10, "unit": "mm", "source": "user", "confidence": 1.0 } } },
+    { "step_seq": "0003" }
+  ],
+  "instruction": "（任意）自然言語での追加指示"
+}
+Response 202: { "status": "modifying", "plan_id": "..." }
+→ GET /build-plans/{plan_id} でポーリング → plan_status=planned に変化したら完了
+```
+
+### UX フロー
+1. ステップ一覧の各行左端のチェックボックスをオンにする（複数可・パラメータ/NL 混在可）
+2. 右パネルが一括修正パネルに切り替わり、チェックした各ステップのパラメータエディタが `<details>` で展開
+3. パラメータを変更 and/or 下部の「自然言語での追加指示」テキストエリアに指示を入力
+4. 「N ステップを一括修正」ボタンをクリック → AI修正中スピナー → 完了後に一覧が自動更新
+
+### 改善策・再発防止
+- AI が内部推論で既存値を変更しても、ユーザーが明示的に指定した値（`explicit_params`）は必ず AI 結果を上書きする。UI 側も「送信後の最新 DynamoDB 値でリセット」を徹底する
+- 複数ステップを一括修正する場合、プロンプトには「修正対象リスト」として全対象を列挙し、AI が相互依存を考慮して修正できるようにする
+- 単一ステップ修正 API（旧 `/steps/{seq}/modify`）は後方互換を保ちつつ新 `/modify` に委譲する形にすることで、フロントエンドの移行を段階的に行える

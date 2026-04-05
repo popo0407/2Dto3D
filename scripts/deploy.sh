@@ -120,7 +120,7 @@ cdk_deploy() {
     cd "$PROJECT_ROOT/cdk"
     source venv_cdk/bin/activate
     
-    cdk deploy --context environment="$ENVIRONMENT" \
+    cdk deploy --all --context environment="$ENVIRONMENT" \
         --require-approval=never \
         --outputs-file="$PROJECT_ROOT/cdk.outputs.json"
     

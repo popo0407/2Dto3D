@@ -78,6 +78,11 @@ def lambda_handler(event: dict, context) -> dict:
         body = json.loads(event.get("body") or "{}")
         return _modify_step(plan_id, step_seq, body)
 
+    # POST /build-plans/{plan_id}/modify — batch multi-step modification
+    if resource == "/build-plans/{plan_id}/modify" and http_method == "POST":
+        body = json.loads(event.get("body") or "{}")
+        return _batch_modify(plan_id, body)
+
     # POST /build-plans/{plan_id}/execute
     if resource.endswith("/execute") and http_method == "POST":
         body = json.loads(event.get("body") or "{}")
@@ -140,23 +145,31 @@ def _get_plan(plan_id: str) -> dict:
 
 
 def _modify_step(plan_id: str, step_seq: str, body: dict) -> dict:
-    """Kick off async step modification via worker Lambda.
-
-    Body format:
-    {
-      "type": "parameter" | "natural_language",
-      "parameters": {...},       // for parameter type
-      "instruction": "...",      // for natural_language type
-      "batch": false             // if true, apply to all steps with same group_id
-    }
-    Returns 202 immediately; actual AI work is done by buildplan_worker_handler.
-    """
-    modification_type = body.get("type", "natural_language")
-    instruction = body.get("instruction", "")
+    """Single-step modify: delegates to _batch_modify for code reuse."""
     new_params = body.get("parameters", {})
-    batch = body.get("batch", False)
+    instruction = body.get("instruction", "")
+    mod: dict = {"step_seq": step_seq}
+    if new_params:
+        mod["parameters"] = new_params
+    return _batch_modify(plan_id, {"modifications": [mod], "instruction": instruction})
 
-    # Load plan
+
+def _batch_modify(plan_id: str, body: dict) -> dict:
+    """Kick off async batch step modification via worker Lambda.
+
+    Body:
+    {
+      "modifications": [{"step_seq": "0002", "parameters": {...}}, ...],
+      "instruction": "..."  // optional NL instruction
+    }
+    Returns 202 immediately.
+    """
+    modifications: list[dict] = body.get("modifications", [])
+    instruction = body.get("instruction", "")
+
+    if not modifications and not instruction.strip():
+        return _response(400, {"error": "modifications または instruction が必要です"})
+
     plans_table = dynamodb.Table(BUILD_PLANS_TABLE)
     plan_resp = plans_table.get_item(Key={"plan_id": plan_id})
     plan = plan_resp.get("Item")
@@ -165,28 +178,16 @@ def _modify_step(plan_id: str, step_seq: str, body: dict) -> dict:
 
     session_id = plan.get("session_id", "")
 
-    # Load all steps to validate target exists and build parameter instruction
-    steps_table = dynamodb.Table(BUILD_STEPS_TABLE)
-    all_steps = _query_all_steps(plan_id, steps_table)
+    # Validate all step_seqs exist
+    if modifications:
+        steps_table = dynamodb.Table(BUILD_STEPS_TABLE)
+        all_steps = _query_all_steps(plan_id, steps_table)
+        existing_seqs = {s["step_seq"] for s in all_steps}
+        for mod in modifications:
+            seq = mod.get("step_seq", "")
+            if seq and seq not in existing_seqs:
+                return _response(404, {"error": f"Step {seq} not found"})
 
-    target_step = next((s for s in all_steps if s["step_seq"] == step_seq), None)
-    if not target_step:
-        return _response(404, {"error": "Step not found"})
-
-    # For parameter modifications, convert to natural language instruction
-    if modification_type == "parameter" and new_params:
-        parts = []
-        for key, val in new_params.items():
-            v = val.get("value", val) if isinstance(val, dict) else val
-            parts.append(f"{key} = {v}")
-        group_id = target_step.get("group_id", "")
-        instruction = f"Step {step_seq} のパラメータを変更: " + ", ".join(parts)
-        if batch and group_id:
-            batch_seqs = [s["step_seq"] for s in all_steps if s.get("group_id") == group_id and s["step_seq"] != step_seq]
-            if batch_seqs:
-                instruction += f"\n同じ group_id ({group_id}) のステップも同様に変更: " + ", ".join(batch_seqs)
-
-    # Set plan status to "modifying"
     plans_table.update_item(
         Key={"plan_id": plan_id},
         UpdateExpression="SET plan_status = :s, updated_at = :now",
@@ -196,7 +197,6 @@ def _modify_step(plan_id: str, step_seq: str, body: dict) -> dict:
         },
     )
 
-    # Invoke worker asynchronously
     if not BUILDPLAN_WORKER_FUNCTION_NAME:
         return _response(500, {"error": "Worker function not configured"})
 
@@ -207,15 +207,12 @@ def _modify_step(plan_id: str, step_seq: str, body: dict) -> dict:
             "action": "modify",
             "plan_id": plan_id,
             "session_id": session_id,
-            "step_seq": step_seq,
+            "modifications": modifications,
             "instruction": instruction,
-            # Pass explicit param values so the worker can guarantee them
-            # even if the AI forgets to update the parameters field.
-            "explicit_params": new_params if modification_type == "parameter" else {},
         }).encode(),
     )
 
-    logger.info("Modify kick-off: plan=%s step=%s", plan_id, step_seq)
+    logger.info("Batch modify kick-off: plan=%s, mods=%d", plan_id, len(modifications))
     return _response(202, {"status": "modifying", "plan_id": plan_id})
 
 

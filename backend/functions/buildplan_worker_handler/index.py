@@ -96,18 +96,18 @@ BUILDPLAN_PROMPT = """添付の2D図面を分析し、3Dモデルを段階的に
 
 MODIFY_PROMPT = """以下のBuildPlanのステップを、ユーザーの指示に従い修正してください。
 
-【対象ステップ】
-{target_step}
+【修正対象ステップ】
+{target_steps_text}
 
 【BuildPlan 全ステップ】
 {all_steps}
 
-【ユーザーの修正指示】
+【追加の修正指示（自然言語）】
 {user_instruction}
 
 【修正ルール】
-1. 修正されたステップから最終ステップまでの全てを再計画してください
-2. 修正前のステップ（対象ステップより前）はそのまま維持
+1. 修正対象の中で最も早い step_seq から最終ステップまでを再計画してください
+2. 修正対象より前のステップはそのまま維持
 3. 各ステップの cq_code は前のステップの result を引き継ぐこと
 4. 穴あけは必ず .faces("...").workplane().pushPoints([...]).hole(d) 形式
 
@@ -264,32 +264,56 @@ def _handle_create(event: dict) -> None:
 def _handle_modify(event: dict) -> None:
     plan_id = event["plan_id"]
     session_id = event["session_id"]
-    step_seq = event["step_seq"]
     instruction = event.get("instruction", "")
-    # Explicit param overrides supplied by the user (type="parameter" path).
-    # These are applied on top of the AI response so user values always win.
-    explicit_params: dict = event.get("explicit_params", {})
+
+    # Support both legacy single step_seq and new batch modifications array
+    if "modifications" in event:
+        modifications: list[dict] = event["modifications"]  # [{step_seq, parameters?}]
+    else:
+        # Legacy format from single-step modify route
+        modifications = [{
+            "step_seq": event["step_seq"],
+            "parameters": event.get("explicit_params", {}),
+        }]
 
     plans_table = dynamodb.Table(BUILD_PLANS_TABLE)
     steps_table = dynamodb.Table(BUILD_STEPS_TABLE)
 
     try:
-        # Load session and image for context
         sessions_table = dynamodb.Table(SESSIONS_TABLE)
         session = sessions_table.get_item(Key={"session_id": session_id}).get("Item", {})
         image_bytes, image_media_type = _load_first_image(session)
 
-        # Load all steps
         all_steps = _query_all_steps(plan_id, steps_table)
-        target_step = next((s for s in all_steps if s["step_seq"] == step_seq), None)
-        if not target_step:
-            raise ValueError(f"Step {step_seq} not found in plan {plan_id}")
 
-        # Build prompt
+        # Build target steps description for prompt
+        target_steps_lines = []
+        for mod in modifications:
+            seq = mod.get("step_seq", "")
+            if not seq:
+                continue
+            target_step = next((s for s in all_steps if s["step_seq"] == seq), None)
+            step_name = target_step.get("step_name", "") if target_step else ""
+            params = mod.get("parameters", {})
+            if params:
+                param_desc = ", ".join(
+                    f"{k}={v.get('value', v) if isinstance(v, dict) else v}"
+                    for k, v in params.items()
+                )
+                target_steps_lines.append(f"- Step {seq} ({step_name}): {param_desc} に変更")
+            else:
+                target_steps_lines.append(f"- Step {seq} ({step_name}): 修正対象（追加指示を参照）")
+
+        target_steps_text = (
+            "\n".join(target_steps_lines) if target_steps_lines else "（自然言語指示のみ）"
+        )
+
         prompt = MODIFY_PROMPT.format(
-            target_step=json.dumps(_decimal_to_float_dict(target_step), ensure_ascii=False, indent=2),
-            all_steps=json.dumps([_decimal_to_float_dict(s) for s in all_steps], ensure_ascii=False, indent=2),
-            user_instruction=instruction,
+            target_steps_text=target_steps_text,
+            all_steps=json.dumps(
+                [_decimal_to_float_dict(s) for s in all_steps], ensure_ascii=False, indent=2
+            ),
+            user_instruction=instruction or "（特になし）",
         )
 
         # Call Bedrock
@@ -303,7 +327,6 @@ def _handle_modify(event: dict) -> None:
             max_tokens=16384,
         )
 
-        # Parse response
         ai_output = _parse_ai_response(invoke_result.text)
         modified_steps = ai_output.get("modified_steps", [])
         reasoning = ai_output.get("reasoning", "")
@@ -311,23 +334,29 @@ def _handle_modify(event: dict) -> None:
         if not modified_steps:
             raise ValueError("AI returned no modified steps")
 
-        # Apply explicit parameter overrides to the target step.
-        # The AI may correctly regenerate cq_code but leave the `parameters`
-        # dict unchanged.  Merging here guarantees the UI shows the user's values.
-        if explicit_params:
-            for mod_step in modified_steps:
-                if mod_step.get("step_seq") == step_seq:
-                    params = mod_step.get("parameters", {})
-                    for key, val in explicit_params.items():
-                        if isinstance(val, dict):
-                            params[key] = {**val, "source": "user", "confidence": 1.0}
-                        else:
-                            params[key] = {"value": val, "unit": "mm",
-                                           "source": "user", "confidence": 1.0}
-                    mod_step["parameters"] = params
-                    break
+        # Build explicit param override map: step_seq -> {key: val}
+        explicit_map: dict[str, dict] = {
+            m["step_seq"]: m.get("parameters", {})
+            for m in modifications
+            if m.get("step_seq") and m.get("parameters")
+        }
 
-        # Update modified steps in DynamoDB
+        # Apply explicit param overrides on top of AI response
+        for mod_step in modified_steps:
+            seq = mod_step.get("step_seq", "")
+            if seq in explicit_map:
+                params = mod_step.get("parameters", {})
+                for key, val in explicit_map[seq].items():
+                    if isinstance(val, dict):
+                        params[key] = {**val, "source": "user", "confidence": 1.0}
+                    else:
+                        params[key] = {
+                            "value": val, "unit": "mm",
+                            "source": "user", "confidence": 1.0,
+                        }
+                mod_step["parameters"] = params
+
+        # Save modified steps to DynamoDB
         now = int(time.time())
         for mod_step in modified_steps:
             seq = mod_step.get("step_seq", "")
@@ -354,31 +383,23 @@ def _handle_modify(event: dict) -> None:
                 },
             )
 
-        # Update plan: status → planned, save reasoning
         plans_table.update_item(
             Key={"plan_id": plan_id},
-            UpdateExpression=(
-                "SET plan_status = :s, modify_reasoning = :r, updated_at = :now"
-            ),
-            ExpressionAttributeValues={
-                ":s": "planned",
-                ":r": reasoning,
-                ":now": now,
-            },
+            UpdateExpression="SET plan_status = :s, modify_reasoning = :r, updated_at = :now",
+            ExpressionAttributeValues={":s": "planned", ":r": reasoning, ":now": now},
         )
 
         logger.info(
-            "BuildPlan modify complete: plan_id=%s, step_seq=%s, modified=%d",
-            plan_id, step_seq, len(modified_steps),
+            "BuildPlan modify complete: plan_id=%s, modified=%d", plan_id, len(modified_steps)
         )
 
     except Exception as e:
-        logger.error("BuildPlan modify failed for plan %s step %s: %s", plan_id, step_seq, e, exc_info=True)
+        logger.error("BuildPlan modify failed for plan %s: %s", plan_id, e, exc_info=True)
         plans_table.update_item(
             Key={"plan_id": plan_id},
             UpdateExpression="SET plan_status = :s, modify_reasoning = :r, updated_at = :now",
             ExpressionAttributeValues={
-                ":s": "planned",          # revert to planned so UI is not stuck
+                ":s": "planned",
                 ":r": f"修正エラー: {e}",
                 ":now": int(time.time()),
             },

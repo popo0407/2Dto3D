@@ -427,6 +427,12 @@ class LambdaStack(Stack):
             "POST", apigw.LambdaIntegration(buildplan_step_fn), **auth_kwargs
         )
 
+        # POST /build-plans/{plan_id}/modify — batch multi-step modification
+        bp_batch_modify_resource = bp_plan_resource.add_resource("modify")
+        bp_batch_modify_resource.add_method(
+            "POST", apigw.LambdaIntegration(buildplan_step_fn), **auth_kwargs
+        )
+
         bp_preview_resource = bp_plan_resource.add_resource("preview")
         bp_preview_step_resource = bp_preview_resource.add_resource("{step_seq}")
         bp_preview_step_resource.add_method(

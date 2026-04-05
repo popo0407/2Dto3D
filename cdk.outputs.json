@@ -1,0 +1,45 @@
+{
+  "Cad2d3d-dev-database": {
+    "ExportsOutputFnGetAttSessionsTable7C302024Arn24FF8012": "arn:aws:dynamodb:ap-northeast-1:590184009554:table/2dto3d-dev-sessions",
+    "ExportsOutputRefSessionsTable7C3020246E1CCFDD": "2dto3d-dev-sessions",
+    "ExportsOutputFnGetAttBuildPlansTable7B4D8844Arn221D9864": "arn:aws:dynamodb:ap-northeast-1:590184009554:table/2dto3d-dev-build-plans",
+    "ExportsOutputFnGetAttDrawingElementsTable9135DB4BArn15272026": "arn:aws:dynamodb:ap-northeast-1:590184009554:table/2dto3d-dev-drawing-elements",
+    "ExportsOutputRefNodesTable91BDF1A88CFA3CE4": "2dto3d-dev-nodes",
+    "ExportsOutputFnGetAttNodesTable91BDF1A8Arn729FD96A": "arn:aws:dynamodb:ap-northeast-1:590184009554:table/2dto3d-dev-nodes",
+    "ExportsOutputFnGetAttConnectionsTable8000B8A1Arn6FD6777C": "arn:aws:dynamodb:ap-northeast-1:590184009554:table/2dto3d-dev-connections",
+    "ExportsOutputFnGetAttBuildStepsTableBCD0BEFFArnDC0A038B": "arn:aws:dynamodb:ap-northeast-1:590184009554:table/2dto3d-dev-build-steps",
+    "ExportsOutputRefBuildPlansTable7B4D8844D31DC237": "2dto3d-dev-build-plans",
+    "ExportsOutputRefDrawingElementsTable9135DB4B8C0CE76F": "2dto3d-dev-drawing-elements",
+    "ExportsOutputRefBuildStepsTableBCD0BEFF5199F227": "2dto3d-dev-build-steps",
+    "ExportsOutputRefConnectionsTable8000B8A13717867F": "2dto3d-dev-connections"
+  },
+  "Cad2d3d-dev-auth": {
+    "ExportsOutputFnGetAttUserPool6BA7E5F2Arn686ACC00": "arn:aws:cognito-idp:ap-northeast-1:590184009554:userpool/ap-northeast-1_omw6GCY4N",
+    "UserPoolClientId": "dp651lflea1qhav7eqpbhlijp",
+    "UserPoolId": "ap-northeast-1_omw6GCY4N"
+  },
+  "Cad2d3d-dev-network": {
+    "ExportsOutputFnGetAttUploadsBucket5E5E9B64Arn8603C131": "arn:aws:s3:::590184009554-2dto3d-dev-uploads",
+    "UploadsBucketName": "590184009554-2dto3d-dev-uploads",
+    "ExportsOutputRefUploadsBucket5E5E9B64F2F56CC2": "590184009554-2dto3d-dev-uploads",
+    "ExportsOutputRefPreviewsBucketE65CC5746765D071": "590184009554-2dto3d-dev-previews",
+    "ExportsOutputFnGetAttPreviewsBucketE65CC574ArnE2219367": "arn:aws:s3:::590184009554-2dto3d-dev-previews",
+    "DistributionDomainName": "d3azdxpj50obab.cloudfront.net",
+    "ExportsOutputFnGetAttArtifactsBucket2AAC5544ArnD57FAE19": "arn:aws:s3:::590184009554-2dto3d-dev-artifacts",
+    "ArtifactsBucketName": "590184009554-2dto3d-dev-artifacts",
+    "ExportsOutputRefArtifactsBucket2AAC55442DB5E6C9": "590184009554-2dto3d-dev-artifacts"
+  },
+  "Cad2d3d-dev-monitoring": {
+    "AlertTopicArn": "arn:aws:sns:ap-northeast-1:590184009554:2dto3d-dev-alerts"
+  },
+  "Cad2d3d-dev-lambda": {
+    "ExportsOutputRefWebSocketApi34BCF99B0F830E68": "mwrah9ladf",
+    "WebSocketUrl": "wss://mwrah9ladf.execute-api.ap-northeast-1.amazonaws.com/dev",
+    "RestApiEndpoint0551178A": "https://ussu5ebma6.execute-api.ap-northeast-1.amazonaws.com/dev/",
+    "RestApiUrl": "https://ussu5ebma6.execute-api.ap-northeast-1.amazonaws.com/dev/"
+  },
+  "Cad2d3d-dev-pipeline": {
+    "ProcessingQueueUrl": "https://sqs.ap-northeast-1.amazonaws.com/590184009554/2dto3d-dev-processing-queue",
+    "StateMachineArn": "arn:aws:states:ap-northeast-1:590184009554:stateMachine:2dto3d-dev-cad-pipeline"
+  }
+}

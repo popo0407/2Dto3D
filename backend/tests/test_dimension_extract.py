@@ -225,9 +225,10 @@ def test_extract_tapped_hole_fillet_chamfer(dynamodb_tables, s3_buckets):
     })
 
     with patch("common.bedrock_client.get_bedrock_client") as mock_bedrock, \
-         patch("common.ws_notify.send_progress"):
+         patch("common.ws_notify.send_progress"), \
+         patch("common.ws_notify.send_token_usage"):
         mock_client = MagicMock()
-        mock_client.invoke_multimodal.return_value = MOCK_AI_RESPONSE_WITH_TAPPED
+        mock_client.invoke_multimodal.return_value = InvokeResult(text=MOCK_AI_RESPONSE_WITH_TAPPED, input_tokens=100, output_tokens=200)
         mock_bedrock.return_value = mock_client
 
         import backend.functions.dimension_extract_handler.index as module
