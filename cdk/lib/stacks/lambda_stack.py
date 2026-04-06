@@ -360,6 +360,11 @@ class LambdaStack(Stack):
             "POST", apigw.LambdaIntegration(upload_fn), **auth_kwargs
         )
 
+        drawing_resource = session_resource.add_resource("drawing")
+        drawing_resource.add_method(
+            "GET", apigw.LambdaIntegration(upload_fn), **auth_kwargs
+        )
+
         process_resource = session_resource.add_resource("process")
         process_resource.add_method(
             "POST", apigw.LambdaIntegration(upload_fn), **auth_kwargs
@@ -419,6 +424,16 @@ class LambdaStack(Stack):
 
         bp_modify_resource = bp_step_resource.add_resource("modify")
         bp_modify_resource.add_method(
+            "POST", apigw.LambdaIntegration(buildplan_step_fn), **auth_kwargs
+        )
+
+        bp_confirm_resource = bp_step_resource.add_resource("confirm")
+        bp_confirm_resource.add_method(
+            "POST", apigw.LambdaIntegration(buildplan_step_fn), **auth_kwargs
+        )
+
+        bp_revise_resource = bp_step_resource.add_resource("revise")
+        bp_revise_resource.add_method(
             "POST", apigw.LambdaIntegration(buildplan_step_fn), **auth_kwargs
         )
 

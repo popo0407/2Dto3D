@@ -73,15 +73,14 @@ def lambda_handler(event: dict, context) -> dict:
             return _get_preview(plan_id, step_seq)
         return _get_step(plan_id, step_seq)
 
-    # POST /build-plans/{plan_id}/steps/{step_seq}/modify
-    if resource.endswith("/modify") and http_method == "POST":
-        body = json.loads(event.get("body") or "{}")
-        return _modify_step(plan_id, step_seq, body)
+    # POST /build-plans/{plan_id}/steps/{step_seq}/confirm
+    if resource.endswith("/confirm") and http_method == "POST":
+        return _confirm_step(plan_id, step_seq, event)
 
-    # POST /build-plans/{plan_id}/modify — batch multi-step modification
-    if resource == "/build-plans/{plan_id}/modify" and http_method == "POST":
+    # POST /build-plans/{plan_id}/steps/{step_seq}/revise
+    if resource.endswith("/revise") and http_method == "POST":
         body = json.loads(event.get("body") or "{}")
-        return _batch_modify(plan_id, body)
+        return _revise_step(plan_id, step_seq, body, event)
 
     # POST /build-plans/{plan_id}/execute
     if resource.endswith("/execute") and http_method == "POST":
@@ -142,6 +141,106 @@ def _get_plan(plan_id: str) -> dict:
 # ---------------------------------------------------------------------------
 # Modify step
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Confirm step (interactive mode)
+# ---------------------------------------------------------------------------
+
+def _confirm_step(plan_id: str, step_seq: str, event: dict) -> dict:
+    """Mark a proposed step as confirmed and kick off next_step generation."""
+    plans_table = dynamodb.Table(BUILD_PLANS_TABLE)
+    steps_table = dynamodb.Table(BUILD_STEPS_TABLE)
+
+    plan_resp = plans_table.get_item(Key={"plan_id": plan_id})
+    plan = plan_resp.get("Item")
+    if not plan:
+        return _response(404, {"error": "Plan not found"})
+
+    step_resp = steps_table.get_item(Key={"plan_id": plan_id, "step_seq": step_seq})
+    if not step_resp.get("Item"):
+        return _response(404, {"error": "Step not found"})
+
+    now = int(time.time())
+    # Mark step as confirmed
+    steps_table.update_item(
+        Key={"plan_id": plan_id, "step_seq": step_seq},
+        UpdateExpression="SET #st = :s",
+        ExpressionAttributeNames={"#st": "status"},
+        ExpressionAttributeValues={":s": "confirmed"},
+    )
+
+    # Update plan: generating next step
+    plans_table.update_item(
+        Key={"plan_id": plan_id},
+        UpdateExpression="SET current_step_status = :css, updated_at = :now",
+        ExpressionAttributeValues={":css": "generating", ":now": now},
+    )
+
+    # Kick off next step generation
+    session_id = plan.get("session_id", "")
+    if not BUILDPLAN_WORKER_FUNCTION_NAME:
+        return _response(500, {"error": "Worker function not configured"})
+
+    lambda_client.invoke(
+        FunctionName=BUILDPLAN_WORKER_FUNCTION_NAME,
+        InvocationType="Event",
+        Payload=json.dumps({
+            "action": "next_step",
+            "plan_id": plan_id,
+            "session_id": session_id,
+        }).encode(),
+    )
+
+    logger.info("confirm_step: plan=%s, seq=%s, next_step kicked", plan_id, step_seq)
+    return _response(200, {"status": "confirmed", "plan_id": plan_id, "step_seq": step_seq})
+
+
+# ---------------------------------------------------------------------------
+# Revise step (interactive mode)
+# ---------------------------------------------------------------------------
+
+def _revise_step(plan_id: str, step_seq: str, body: dict, event: dict) -> dict:
+    """Request AI to revise a proposed step based on user instruction.
+
+    Body: {"instruction": "穴の直径が違います。φ6mmにしてください。"}
+    Returns 202 immediately. Worker handles async revision.
+    """
+    instruction = body.get("instruction", "").strip()
+    if not instruction:
+        return _response(400, {"error": "instruction が必要です"})
+
+    plans_table = dynamodb.Table(BUILD_PLANS_TABLE)
+    plan_resp = plans_table.get_item(Key={"plan_id": plan_id})
+    plan = plan_resp.get("Item")
+    if not plan:
+        return _response(404, {"error": "Plan not found"})
+
+    now = int(time.time())
+    plans_table.update_item(
+        Key={"plan_id": plan_id},
+        UpdateExpression="SET current_step_status = :css, updated_at = :now",
+        ExpressionAttributeValues={":css": "revising", ":now": now},
+    )
+
+    session_id = plan.get("session_id", "")
+    if not BUILDPLAN_WORKER_FUNCTION_NAME:
+        return _response(500, {"error": "Worker function not configured"})
+
+    lambda_client.invoke(
+        FunctionName=BUILDPLAN_WORKER_FUNCTION_NAME,
+        InvocationType="Event",
+        Payload=json.dumps({
+            "action": "revise_step",
+            "plan_id": plan_id,
+            "session_id": session_id,
+            "step_seq": step_seq,
+            "user_message": instruction,
+        }).encode(),
+    )
+
+    logger.info("revise_step: plan=%s, seq=%s, instruction=%s", plan_id, step_seq, instruction[:50])
+    return _response(202, {"status": "revising", "plan_id": plan_id, "step_seq": step_seq})
 
 
 def _modify_step(plan_id: str, step_seq: str, body: dict) -> dict:

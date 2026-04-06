@@ -33,103 +33,60 @@ dynamodb = boto3.resource("dynamodb")
 s3_client = boto3.client("s3")
 
 # ---------------------------------------------------------------------------
-# Prompts (shared with create and modify workflows)
+# Prompts
 # ---------------------------------------------------------------------------
 
-BUILDPLAN_SYSTEM_PROMPT = """あなたは機械設計の専門家でありCADオペレーターです。
-2D図面を分析し、3D CADモデルを段階的に構築するための構築プラン（BuildPlan）を作成してください。
-BuildPlanは実際のCADオペレーターが手作業で組み上げるのと同じ手順で、1ステップずつ構築する計画です。"""
+INTERACTIVE_SYSTEM_PROMPT = """あなたは機械設計の専門家でありCADオペレーターです。
+2D図面を1ステップずつ分析しながら、3D CADモデルを段階的に構築します。
+各ステップで図面のどの部分をどのように解釈したか、ユーザーが確認できるよう丁寧に説明してください。"""
 
-BUILDPLAN_PROMPT = """添付の2D図面を分析し、3Dモデルを段階的に構築するBuildPlanを作成してください。
+NEXT_STEP_PROMPT = """添付の2D図面を見て、3Dモデルを段階的に構築しています。
 
-【BuildPlan の原則】
-1. 最初にベース形状（box/cylinder等）を1ステップで作成
-2. その後、加工フィーチャーを1つずつ追加（穴あけ、面取り等）
-3. 同じ仕様（同径・同深さ・同面）の穴は1ステップにまとめる（group_id で管理）
-4. 穴あけとタップ加工は1ステップにまとめる（実際の加工と同じ）
-5. 各ステップの CadQuery コードは前のステップの result を引き継ぐ
+【確定済みステップ】
+{confirmed_steps}
+
+【次のステップを1つ提案してください】
+- 確定済みステップの続きとして次に行う加工を1つだけ提案してください
+- 最初のステップは必ず base_body（直方体・円柱などのベース形状）にしてください
+- 穴あけは必ず .faces("...").workplane().pushPoints([...]).hole(d) 形式
+- 全ての加工が完了した場合は {{"is_complete": true}} のみを返してください
 
 【step_type 一覧】
 - base_body: ベース形状（box, cylinder）
-- hole_through: 貫通穴
-- hole_blind: 止め穴
-- tapped_hole: ネジ穴（下穴+タップを1ステップとして扱う）
-- fillet: R面取り
-- chamfer: C面取り
-- slot: 長穴
-- pocket: ポケット加工
-
-【穴の方向と面指定 ― 最重要ルール】
-- 穴の方向は図面のビュー（正面/平面/側面）から判断
-- 穴あけは必ず .faces("...").workplane().pushPoints([...]).hole(d) 形式
-- .faces("...").workplane() を省略禁止
+- hole_through: 貫通穴、hole_blind: 止め穴、tapped_hole: ネジ穴
+- fillet: R面取り、chamfer: C面取り、slot: 長穴、pocket: ポケット加工
 
 【CadQuery 座標系】
-- .box() は原点中心に生成（左端 = -W/2, 右端 = +W/2）
-- 図面座標 (Xd, Yd) → CadQuery = (Xd - W/2, Yd - H/2)
+- .box(W, D, H): 原点中心。図面座標(Xd,Yd) → CQ: (Xd-W/2, Yd-H/2)
+- 確定済みステップがある場合、cq_code は result 変数を引き継ぐ
 
-【parameters のフォーマット】
-各パラメータは以下の形式で記述:
-{{"value": 数値または文字列, "unit": "mm", "source": "extracted|standard|calculated", "confidence": 0.0-1.0}}
+【パラメータ形式】
+{{"value": 数値, "unit": "mm", "source": "extracted|standard|calculated", "confidence": 0.0-1.0}}
 
-【出力フォーマット（JSON のみ）】
+【出力フォーマット（JSONのみ）】
 ```json
 {{
-  "reasoning": "図面の分析結果と構築戦略の説明（日本語）",
-  "steps": [
-    {{
-      "step_seq": "0001",
-      "step_type": "base_body",
-      "step_name": "基本直方体",
-      "parameters": {{}},
-      "cq_code": "result = cq.Workplane('XY').box(100, 50, 10)",
-      "group_id": "",
-      "confidence": 0.95,
-      "ai_reasoning": "..."
-    }}
-  ]
+  "is_complete": false,
+  "step_type": "base_body",
+  "step_name": "基本直方体",
+  "parameters": {{"width": {{"value": 100, "unit": "mm", "source": "extracted", "confidence": 0.95}}}},
+  "cq_code": "result = cq.Workplane('XY').box(100, 50, 30)",
+  "group_id": "",
+  "confidence": 0.95,
+  "explanation": "正面図の外形から幅100mm、側面図から奥行30mmと読み取りました",
+  "choices": []
 }}
 ```
-
-【重要】JSON のみを出力してください。cq_code の先頭に import 文は不要です。
+※ confidence < 0.85 の場合のみ choices に解釈の選択肢を入れてください（例: [{{{"id":"a","label":"φ8mm"}},...}}]）
+※ JSON のみ出力。cq_code の先頭に import 文は不要
 """
 
-MODIFY_PROMPT = """以下のBuildPlanのステップを、ユーザーの指示に従い修正してください。
+REVISE_SYSTEM_PROMPT = """あなたは機械設計の専門家でありCADオペレーターです。
+ユーザーの指摘を受けてステップの修正案を提案してください。
+過去の会話履歴を踏まえた上で、同じJSON形式（is_complete, step_type, step_name, parameters, cq_code, group_id, confidence, explanation, choices）で修正版を返してください。
+JSON のみ出力してください。"""
 
-【修正対象ステップ】
-{target_steps_text}
 
-【BuildPlan 全ステップ】
-{all_steps}
-
-【追加の修正指示（自然言語）】
-{user_instruction}
-
-【修正ルール】
-1. 修正対象の中で最も早い step_seq から最終ステップまでを再計画してください
-2. 修正対象より前のステップはそのまま維持
-3. 各ステップの cq_code は前のステップの result を引き継ぐこと
-4. 穴あけは必ず .faces("...").workplane().pushPoints([...]).hole(d) 形式
-
-【出力フォーマット（JSON のみ）】
-```json
-{{
-  "reasoning": "修正内容の説明（日本語）",
-  "modified_steps": [
-    {{
-      "step_seq": "0002",
-      "step_type": "...",
-      "step_name": "...",
-      "parameters": {{}},
-      "cq_code": "...",
-      "group_id": "...",
-      "confidence": 0.95,
-      "ai_reasoning": "..."
-    }}
-  ]
-}}
-```
-"""
 
 
 # ---------------------------------------------------------------------------
@@ -141,111 +98,140 @@ def lambda_handler(event: dict, context) -> None:
     action = event.get("action", "create")
     logger.info("BuildPlan worker: action=%s", action)
 
-    if action == "create":
-        _handle_create(event)
-    elif action == "modify":
-        _handle_modify(event)
+    if action == "next_step":
+        _handle_next_step(event)
+    elif action == "revise_step":
+        _handle_revise_step(event)
     else:
         logger.error("Unknown action: %s", action)
 
 
 # ---------------------------------------------------------------------------
-# Create action
+# Next Step action (interactive mode: propose one step at a time)
 # ---------------------------------------------------------------------------
 
-def _handle_create(event: dict) -> None:
+def _handle_next_step(event: dict) -> None:
+    """Generate the next proposed step based on confirmed steps so far."""
     plan_id = event["plan_id"]
     session_id = event["session_id"]
-    node_id = event["node_id"]
+    node_id = event.get("node_id", "")
 
     plans_table = dynamodb.Table(BUILD_PLANS_TABLE)
+    steps_table = dynamodb.Table(BUILD_STEPS_TABLE)
 
     try:
-        # Load session and image
         sessions_table = dynamodb.Table(SESSIONS_TABLE)
         session = sessions_table.get_item(Key={"session_id": session_id}).get("Item", {})
-
         image_bytes, image_media_type = _load_first_image(session)
-        parsed_data = _load_parsed_data(session_id)
 
-        # Call Bedrock
+        # Get confirmed steps in order
+        all_steps = _query_all_steps(plan_id, steps_table)
+        confirmed = [s for s in all_steps if s.get("status") == "confirmed"]
+        next_num = len(confirmed) + 1
+        next_seq = str(next_num).zfill(4)
+
+        # Build confirmed summary for prompt
+        if confirmed:
+            lines = []
+            for s in confirmed:
+                lines.append(
+                    f"Step {s['step_seq']} ({s.get('step_type','')}) — {s.get('step_name','')}:\n"
+                    f"  {s.get('cq_code','')}"
+                )
+            confirmed_summary = "\n\n".join(lines)
+        else:
+            confirmed_summary = "（確定済みステップなし — これが最初のステップです）"
+
         from common.bedrock_client import get_bedrock_client
         client = get_bedrock_client(region=BEDROCK_REGION)
-
-        context_json = parsed_data.get("files") if parsed_data else None
         invoke_result = client.invoke_multimodal(
-            prompt=BUILDPLAN_PROMPT,
+            prompt=NEXT_STEP_PROMPT.format(confirmed_steps=confirmed_summary),
             image_bytes=image_bytes,
             image_media_type=image_media_type,
-            context_json=context_json,
-            system_prompt=BUILDPLAN_SYSTEM_PROMPT,
-            max_tokens=16384,
+            system_prompt=INTERACTIVE_SYSTEM_PROMPT,
+            max_tokens=4096,
         )
 
-        # Parse AI response
         ai_output = _parse_ai_response(invoke_result.text)
-        steps = ai_output.get("steps", [])
-        reasoning = ai_output.get("reasoning", "")
-
-        if not steps:
-            raise ValueError("AI returned no steps")
-
-        # Save steps to DynamoDB
-        steps_table = dynamodb.Table(BUILD_STEPS_TABLE)
         now = int(time.time())
-        for step_data in steps:
-            steps_table.put_item(Item={
-                "plan_id": plan_id,
-                "step_seq": step_data.get("step_seq", ""),
-                "step_type": step_data.get("step_type", ""),
-                "step_name": step_data.get("step_name", ""),
-                "parameters": _float_to_decimal(step_data.get("parameters", {})),
-                "cq_code": step_data.get("cq_code", ""),
-                "dependencies": step_data.get("dependencies", []),
-                "group_id": step_data.get("group_id", ""),
-                "confidence": Decimal(str(step_data.get("confidence", 0.0))),
-                "status": "planned",
-                "ai_reasoning": step_data.get("ai_reasoning", ""),
-                "checkpoint_step_key": "",
-                "checkpoint_glb_key": "",
-                "executed_at": 0,
-                "ttl": now + 90 * 86400,
-            })
 
-        # Update plan: status → planned
+        if ai_output.get("is_complete"):
+            # All steps done
+            plans_table.update_item(
+                Key={"plan_id": plan_id},
+                UpdateExpression=(
+                    "SET plan_status = :s, current_step_seq = :cs, "
+                    "current_step_status = :css, total_steps = :t, updated_at = :now"
+                ),
+                ExpressionAttributeValues={
+                    ":s": "interactive",
+                    ":cs": "",
+                    ":css": "done",
+                    ":t": len(confirmed),
+                    ":now": now,
+                },
+            )
+            logger.info("BuildPlan next_step: all complete, plan_id=%s", plan_id)
+            return
+
+        # Save proposed step
+        choices = _float_to_decimal(ai_output.get("choices", []))
+        steps_table.put_item(Item={
+            "plan_id": plan_id,
+            "step_seq": next_seq,
+            "step_type": ai_output.get("step_type", ""),
+            "step_name": ai_output.get("step_name", ""),
+            "parameters": _float_to_decimal(ai_output.get("parameters", {})),
+            "cq_code": ai_output.get("cq_code", ""),
+            "dependencies": [],
+            "group_id": ai_output.get("group_id", ""),
+            "confidence": Decimal(str(ai_output.get("confidence", 0.0))),
+            "status": "proposed",
+            "ai_reasoning": ai_output.get("explanation", ""),
+            "choices": choices,
+            "conversation": [
+                {"role": "assistant", "content": invoke_result.text, "timestamp": now}
+            ],
+            "checkpoint_step_key": "",
+            "checkpoint_glb_key": "",
+            "executed_at": 0,
+            "ttl": now + 90 * 86400,
+        })
+
+        # Update plan
         plans_table.update_item(
             Key={"plan_id": plan_id},
             UpdateExpression=(
-                "SET plan_status = :s, total_steps = :t, reasoning = :r, updated_at = :now"
+                "SET plan_status = :s, current_step_seq = :cs, "
+                "current_step_status = :css, updated_at = :now"
             ),
             ExpressionAttributeValues={
-                ":s": "planned",
-                ":t": len(steps),
-                ":r": reasoning,
+                ":s": "interactive",
+                ":cs": next_seq,
+                ":css": "ready",
                 ":now": now,
             },
         )
 
-        # Update node with reasoning
-        nodes_table = dynamodb.Table(NODES_TABLE)
-        nodes_table.update_item(
-            Key={"node_id": node_id},
-            UpdateExpression="SET ai_reasoning = :r",
-            ExpressionAttributeValues={":r": reasoning},
-        )
+        # Update session & node on first step
+        if next_num == 1 and node_id:
+            nodes_table = dynamodb.Table(NODES_TABLE)
+            nodes_table.update_item(
+                Key={"node_id": node_id},
+                UpdateExpression="SET ai_reasoning = :r",
+                ExpressionAttributeValues={":r": ai_output.get("explanation", "")},
+            )
+            sessions_table.update_item(
+                Key={"session_id": session_id},
+                UpdateExpression="SET #s = :s, updated_at = :now",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={":s": "BUILDPLAN_ACTIVE", ":now": now},
+            )
 
-        # Update session status
-        sessions_table.update_item(
-            Key={"session_id": session_id},
-            UpdateExpression="SET #s = :s, updated_at = :now",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={":s": "BUILDPLAN_ACTIVE", ":now": now},
-        )
-
-        logger.info("BuildPlan create complete: plan_id=%s, steps=%d", plan_id, len(steps))
+        logger.info("next_step proposed: plan_id=%s, seq=%s", plan_id, next_seq)
 
     except Exception as e:
-        logger.error("BuildPlan create failed for plan %s: %s", plan_id, e, exc_info=True)
+        logger.error("next_step failed for plan %s: %s", plan_id, e, exc_info=True)
         plans_table.update_item(
             Key={"plan_id": plan_id},
             UpdateExpression="SET plan_status = :s, reasoning = :r, updated_at = :now",
@@ -258,23 +244,15 @@ def _handle_create(event: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Modify action
+# Revise Step action (re-propose a step based on user feedback)
 # ---------------------------------------------------------------------------
 
-def _handle_modify(event: dict) -> None:
+def _handle_revise_step(event: dict) -> None:
+    """Revise a proposed step using conversation history + user instruction."""
     plan_id = event["plan_id"]
     session_id = event["session_id"]
-    instruction = event.get("instruction", "")
-
-    # Support both legacy single step_seq and new batch modifications array
-    if "modifications" in event:
-        modifications: list[dict] = event["modifications"]  # [{step_seq, parameters?}]
-    else:
-        # Legacy format from single-step modify route
-        modifications = [{
-            "step_seq": event["step_seq"],
-            "parameters": event.get("explicit_params", {}),
-        }]
+    step_seq = event["step_seq"]
+    user_message = event["user_message"]
 
     plans_table = dynamodb.Table(BUILD_PLANS_TABLE)
     steps_table = dynamodb.Table(BUILD_STEPS_TABLE)
@@ -284,125 +262,108 @@ def _handle_modify(event: dict) -> None:
         session = sessions_table.get_item(Key={"session_id": session_id}).get("Item", {})
         image_bytes, image_media_type = _load_first_image(session)
 
+        # Load step and confirmed summary
+        step_resp = steps_table.get_item(Key={"plan_id": plan_id, "step_seq": step_seq})
+        step = step_resp.get("Item", {})
+        conversation: list = list(step.get("conversation", []))
+
         all_steps = _query_all_steps(plan_id, steps_table)
+        confirmed = [s for s in all_steps if s.get("status") == "confirmed"]
+        if confirmed:
+            confirmed_summary = "\n".join(
+                f"Step {s['step_seq']} ({s.get('step_type','')}) — {s.get('step_name','')}:\n  {s.get('cq_code','')}"  # noqa: E501
+                for s in confirmed
+            )
+        else:
+            confirmed_summary = "（確定済みステップなし）"
 
-        # Build target steps description for prompt
-        target_steps_lines = []
-        for mod in modifications:
-            seq = mod.get("step_seq", "")
-            if not seq:
-                continue
-            target_step = next((s for s in all_steps if s["step_seq"] == seq), None)
-            step_name = target_step.get("step_name", "") if target_step else ""
-            params = mod.get("parameters", {})
-            if params:
-                param_desc = ", ".join(
-                    f"{k}={v.get('value', v) if isinstance(v, dict) else v}"
-                    for k, v in params.items()
-                )
-                target_steps_lines.append(f"- Step {seq} ({step_name}): {param_desc} に変更")
-            else:
-                target_steps_lines.append(f"- Step {seq} ({step_name}): 修正対象（追加指示を参照）")
-
-        target_steps_text = (
-            "\n".join(target_steps_lines) if target_steps_lines else "（自然言語指示のみ）"
-        )
-
-        prompt = MODIFY_PROMPT.format(
-            target_steps_text=target_steps_text,
-            all_steps=json.dumps(
-                [_decimal_to_float_dict(s) for s in all_steps], ensure_ascii=False, indent=2
+        # Build messages: synthetic first user (image + context), then conversation, then new user
+        initial_user_content: list = []
+        if image_bytes:
+            import base64
+            initial_user_content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": image_media_type,
+                    "data": base64.b64encode(image_bytes).decode(),
+                },
+            })
+        initial_user_content.append({
+            "type": "text",
+            "text": (
+                f"2D図面を見て、3Dモデル構築の次のステップを提案してください。\n\n"
+                f"確定済みステップ:\n{confirmed_summary}\n\n"
+                "同じJSONフォーマットで回答してください。"
             ),
-            user_instruction=instruction or "（特になし）",
-        )
+        })
 
-        # Call Bedrock
+        messages: list[dict] = [{"role": "user", "content": initial_user_content}]
+        for entry in conversation:
+            messages.append({
+                "role": entry["role"],
+                "content": str(entry["content"]),
+            })
+        messages.append({
+            "role": "user",
+            "content": f"{user_message}\n\n同じJSON形式で修正版を出力してください。",
+        })
+
         from common.bedrock_client import get_bedrock_client
         client = get_bedrock_client(region=BEDROCK_REGION)
-        invoke_result = client.invoke_multimodal(
-            prompt=prompt,
-            image_bytes=image_bytes,
-            image_media_type=image_media_type,
-            system_prompt="あなたは機械設計の専門家です。BuildPlanのステップ修正を行ってください。",
-            max_tokens=16384,
+        invoke_result = client.invoke_with_messages(
+            messages=messages,
+            system_prompt=REVISE_SYSTEM_PROMPT,
+            max_tokens=4096,
         )
 
         ai_output = _parse_ai_response(invoke_result.text)
-        modified_steps = ai_output.get("modified_steps", [])
-        reasoning = ai_output.get("reasoning", "")
-
-        if not modified_steps:
-            raise ValueError("AI returned no modified steps")
-
-        # Build explicit param override map: step_seq -> {key: val}
-        explicit_map: dict[str, dict] = {
-            m["step_seq"]: m.get("parameters", {})
-            for m in modifications
-            if m.get("step_seq") and m.get("parameters")
-        }
-
-        # Apply explicit param overrides on top of AI response
-        for mod_step in modified_steps:
-            seq = mod_step.get("step_seq", "")
-            if seq in explicit_map:
-                params = mod_step.get("parameters", {})
-                for key, val in explicit_map[seq].items():
-                    if isinstance(val, dict):
-                        params[key] = {**val, "source": "user", "confidence": 1.0}
-                    else:
-                        params[key] = {
-                            "value": val, "unit": "mm",
-                            "source": "user", "confidence": 1.0,
-                        }
-                mod_step["parameters"] = params
-
-        # Save modified steps to DynamoDB
         now = int(time.time())
-        for mod_step in modified_steps:
-            seq = mod_step.get("step_seq", "")
-            if not seq:
-                continue
-            steps_table.update_item(
-                Key={"plan_id": plan_id, "step_seq": seq},
-                UpdateExpression=(
-                    "SET step_type = :stype, step_name = :sname, "
-                    "parameters = :params, cq_code = :code, "
-                    "group_id = :gid, confidence = :conf, "
-                    "#st = :status, ai_reasoning = :reason"
-                ),
-                ExpressionAttributeNames={"#st": "status"},
-                ExpressionAttributeValues={
-                    ":stype": mod_step.get("step_type", ""),
-                    ":sname": mod_step.get("step_name", ""),
-                    ":params": _float_to_decimal(mod_step.get("parameters", {})),
-                    ":code": mod_step.get("cq_code", ""),
-                    ":gid": mod_step.get("group_id", ""),
-                    ":conf": Decimal(str(mod_step.get("confidence", 0.0))),
-                    ":status": "modified",
-                    ":reason": mod_step.get("ai_reasoning", ""),
-                },
-            )
 
+        # Append to conversation history
+        new_conversation = list(conversation) + [
+            {"role": "user", "content": user_message, "timestamp": now},
+            {"role": "assistant", "content": invoke_result.text, "timestamp": now},
+        ]
+
+        # Update step with revised proposal
+        choices = _float_to_decimal(ai_output.get("choices", []))
+        steps_table.update_item(
+            Key={"plan_id": plan_id, "step_seq": step_seq},
+            UpdateExpression=(
+                "SET step_type = :stype, step_name = :sname, "
+                "parameters = :params, cq_code = :code, "
+                "group_id = :gid, confidence = :conf, "
+                "ai_reasoning = :reason, choices = :ch, conversation = :conv"
+            ),
+            ExpressionAttributeValues={
+                ":stype": ai_output.get("step_type", step.get("step_type", "")),
+                ":sname": ai_output.get("step_name", step.get("step_name", "")),
+                ":params": _float_to_decimal(ai_output.get("parameters", {})),
+                ":code": ai_output.get("cq_code", step.get("cq_code", "")),
+                ":gid": ai_output.get("group_id", step.get("group_id", "")),
+                ":conf": Decimal(str(ai_output.get("confidence", 0.0))),
+                ":reason": ai_output.get("explanation", ""),
+                ":ch": choices,
+                ":conv": new_conversation,
+            },
+        )
+
+        # Update plan status back to ready
         plans_table.update_item(
             Key={"plan_id": plan_id},
-            UpdateExpression="SET plan_status = :s, modify_reasoning = :r, updated_at = :now",
-            ExpressionAttributeValues={":s": "planned", ":r": reasoning, ":now": now},
+            UpdateExpression="SET current_step_status = :css, updated_at = :now",
+            ExpressionAttributeValues={":css": "ready", ":now": now},
         )
 
-        logger.info(
-            "BuildPlan modify complete: plan_id=%s, modified=%d", plan_id, len(modified_steps)
-        )
+        logger.info("revise_step complete: plan_id=%s, seq=%s", plan_id, step_seq)
 
     except Exception as e:
-        logger.error("BuildPlan modify failed for plan %s: %s", plan_id, e, exc_info=True)
+        logger.error("revise_step failed for plan %s seq %s: %s", plan_id, step_seq, e, exc_info=True)
         plans_table.update_item(
             Key={"plan_id": plan_id},
-            UpdateExpression="SET plan_status = :s, modify_reasoning = :r, updated_at = :now",
-            ExpressionAttributeValues={
-                ":s": "planned",
-                ":r": f"修正エラー: {e}",
-                ":now": int(time.time()),
-            },
+            UpdateExpression="SET current_step_status = :css, updated_at = :now",
+            ExpressionAttributeValues={":css": "ready", ":now": int(time.time())},
         )
 
 

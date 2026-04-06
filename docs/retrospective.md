@@ -671,3 +671,56 @@ box(W, D, H) → BoxGeometry(W, H, D)
 - `three-bvh-csg` の CSG 演算は入力メッシュの `updateMatrixWorld()` を事前に呼ぶ必要がある
 - 正規表現パースでは TypeScript strict モード下で `RegExpMatchArray[n]` が常に `string | undefined` になる。`nullish coalescing` または `!` アサーションで明示的に扱うこと
 - CSG は近似であることをユーザーに注釈で伝える（長穴の端部 R、フィレット省略等）
+
+---
+
+## 2026-07 BuildPlan インタラクティブ 1 ステップ対話モードへ全面刷新
+
+### 実施内容
+- 「全ステップを一括生成して後から修正」だった BuildPlan モードを「AI が1ステップずつ提案・ユーザーが対話しながら確定」するインタラクティブモードに全面置き換え
+- バックエンド 6 ファイルとフロントエンド 1 ファイルを変更
+
+### 変更ファイル一覧
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `backend/common/bedrock_client.py` | `invoke_with_messages()` メソッド追加（多ターン会話用） |
+| `backend/functions/upload_handler/index.py` | `GET /sessions/{id}/drawing` エンドポイント追加（元図面の署名付き URL 取得） |
+| `backend/functions/buildplan_create_handler/index.py` | 初期レコードに `current_step_seq`, `current_step_status="generating"` を追加。worker kickoff を `action="next_step"` に変更 |
+| `backend/functions/buildplan_worker_handler/index.py` | プロンプトを `INTERACTIVE_SYSTEM_PROMPT` + `NEXT_STEP_PROMPT` + `REVISE_SYSTEM_PROMPT` に置換。 `_handle_next_step()` / `_handle_revise_step()` を実装 |
+| `backend/functions/buildplan_step_handler/index.py` | `_confirm_step()` / `_revise_step()` 追加。`/confirm`, `/revise` ルートを追加 |
+| `cdk/lib/stacks/lambda_stack.py` | `confirm`, `revise`, `drawing` API ルートを追加 |
+| `frontend/src/components/BuildPlanPanel.tsx` | 60/40 分割レイアウト・チャット UI・ポーリングロジックを完全書き換え |
+
+### 新しいワークフロー
+
+```
+POST /build-plans  →  create_handler (202) → worker(next_step)
+worker: 確定済みステップ要約 + 図面画像 → Bedrock → 1 ステップ提案
+        → current_step_status="ready" / plan_status="interactive"
+Frontend: GET /build-plans/{id} を 3 秒ごとにポーリング
+  current_step_status=="ready" → GET /steps/{seq} → チャットに AI メッセージ表示
+  ユーザーが OK → POST /steps/{seq}/confirm → worker(next_step) → ループ
+  ユーザーが修正指示 → POST /steps/{seq}/revise → worker(revise_step) → ポーリング
+  current_step_status=="done" → 「3D 生成」ボタン表示
+```
+
+### 設計判断
+
+| 判断 | 理由 |
+|------|------|
+| `conversation` 配列を DynamoDB ステップに持つ | Bedrock Agent 不要。多ターン会話履歴をステップ単位で管理し、revise 時に `invoke_with_messages()` へ渡す |
+| `choices[]` を AI レスポンスに含める | AI の確信度が低い（confidence < 0.85）場合に選択肢を提示。UI で ChoiceButton として表示し、クリックで revise を自動送信 |
+| 60/40 分割レイアウト | 元図面（2D）と 3D プレビューを常時表示することで、ユーザーが AI の提案を検証しやすくする |
+| 旧バッチモードを完全廃止 | 並立維持によるコード複雑化を避けるため、コードとAPIルートの両方で旧モードを削除 |
+
+### 発生した問題と対処
+
+| 問題 | 原因 | 対処 |
+|------|------|------|
+| ポーリング中に同一 `current_step_seq` で step を二重取得する懸念 | `current_step_status=="ready"` 状態は confirm/revise するまで維持される | フロントエンド側 `prevStepSeqRef` で前回取得済み seq を記録し、一致する場合はスキップ。revise 時に `prevStepSeqRef.current = ""` でリセット |
+
+### 改善策・再発防止
+- 1 ステップ対話型は図面認識精度が低い場合でも人間が各ステップを確認して修正できるため、完全自動生成より最終品質が安定する
+- `invoke_with_messages()` で会話履歴を渡す場合、最初のユーザーメッセージに画像を含める（合成的なファーストメッセージ）ことで全ターンで AI が図面を参照できる
+- ポーリングの二重実行を防ぐため、`startPolling()` の冒頭で `clearTimeout(pollingTimerRef.current)` を呼ぶ

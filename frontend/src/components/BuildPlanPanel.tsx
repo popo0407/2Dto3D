@@ -23,8 +23,9 @@ export interface BuildStep {
   dependencies: string[];
   group_id: string;
   confidence: number;
-  status: "planned" | "executing" | "completed" | "modified" | "failed";
+  status: "proposed" | "confirmed" | "executing" | "completed" | "planned" | "modified" | "failed";
   ai_reasoning: string;
+  choices?: Array<{ id: string; label: string }>;
   checkpoint_step_key: string;
   checkpoint_glb_key: string;
   executed_at: number;
@@ -39,6 +40,20 @@ export interface BuildPlan {
   steps: BuildStep[];
 }
 
+interface ChatMessage {
+  id: string;
+  role: "ai" | "user" | "system";
+  content: string;
+  choices?: Array<{ id: string; label: string }>;
+}
+
+interface PollState {
+  plan_status: string;
+  current_step_seq: string;
+  current_step_status: string;
+  reasoning: string;
+}
+
 interface Props {
   sessionId: string;
   idToken: string;
@@ -49,24 +64,8 @@ interface Props {
 }
 
 // ---------------------------------------------------------------------------
-// Status helpers
+// Constants
 // ---------------------------------------------------------------------------
-
-const STATUS_ICON: Record<string, string> = {
-  planned: "○",
-  executing: "◎",
-  completed: "✓",
-  modified: "✎",
-  failed: "✗",
-};
-
-const STATUS_COLOR: Record<string, string> = {
-  planned: "text-gray-400",
-  executing: "text-blue-500 animate-pulse",
-  completed: "text-green-600",
-  modified: "text-amber-500",
-  failed: "text-red-500",
-};
 
 const STEP_TYPE_LABEL: Record<string, string> = {
   base_body: "基本形状",
@@ -80,7 +79,49 @@ const STEP_TYPE_LABEL: Record<string, string> = {
 };
 
 // ---------------------------------------------------------------------------
-// Component
+// Sub-components
+// ---------------------------------------------------------------------------
+
+function DrawingViewer({ url }: { url: string | null }) {
+  if (!url) {
+    return (
+      <div className="flex h-full items-center justify-center bg-gray-100 text-xs text-gray-400">
+        2D 図面を読み込み中...
+      </div>
+    );
+  }
+  return (
+    <div className="flex h-full items-center justify-center overflow-auto bg-gray-50 p-2">
+      <img src={url} alt="2D図面" className="max-h-full max-w-full object-contain" />
+    </div>
+  );
+}
+
+function ChatBubble({ message }: { message: ChatMessage }) {
+  const isAi = message.role === "ai";
+  const isSystem = message.role === "system";
+  return (
+    <div className={`flex ${isAi || isSystem ? "justify-start" : "justify-end"} mb-2`}>
+      <div
+        className={`max-w-[88%] rounded-xl px-3 py-2 text-xs ${
+          isSystem
+            ? "bg-green-50 text-[10px] italic text-green-700"
+            : isAi
+            ? "border border-gray-100 bg-white text-gray-800 shadow-sm"
+            : "bg-indigo-600 text-white"
+        }`}
+      >
+        {isAi && (
+          <span className="mb-1 block text-[10px] font-semibold text-indigo-500">AI</span>
+        )}
+        <p className="whitespace-pre-wrap leading-relaxed">{message.content}</p>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main component
 // ---------------------------------------------------------------------------
 
 export function BuildPlanPanel({
@@ -90,184 +131,270 @@ export function BuildPlanPanel({
   onPlanCreated,
   onExecutionComplete,
 }: Props) {
-  const [selectedStep, setSelectedStep] = useState<string | null>(null);
-  const [editingParams, setEditingParams] = useState<Record<string, string>>({});
-  const [chatInput, setChatInput] = useState("");
+  const [planId, setPlanId] = useState<string | null>(plan?.plan_id ?? null);
+  const [nodeId, setNodeId] = useState<string>(plan?.node_id ?? "");
+  const [pollState, setPollState] = useState<PollState | null>(null);
+  const [currentStep, setCurrentStep] = useState<BuildStep | null>(null);
+  const [confirmedSteps, setConfirmedSteps] = useState<BuildStep[]>([]);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [userInput, setUserInput] = useState("");
+  const [activeTab, setActiveTab] = useState<"chat" | "step">("chat");
+  const [drawingUrl, setDrawingUrl] = useState<string | null>(null);
   const [isCreating, setIsCreating] = useState(false);
+  const [isWaiting, setIsWaiting] = useState(false);
   const [isExecuting, setIsExecuting] = useState(false);
-  const [isModifying, setIsModifying] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [executionLog, setExecutionLog] = useState<string[]>([]);
-  const [localSteps, setLocalSteps] = useState<BuildStep[]>([]);
-  const [checkedSteps, setCheckedSteps] = useState<Set<string>>(new Set());
-  const [batchParams, setBatchParams] = useState<Record<string, Record<string, string>>>({});
-  const [batchInstruction, setBatchInstruction] = useState("");
-  const [showExecConfirm, setShowExecConfirm] = useState(false);
   const [execElapsed, setExecElapsed] = useState(0);
-  const chatInputRef = useRef<HTMLInputElement>(null);
+  const [error, setError] = useState<string | null>(null);
+
   const pollingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const execTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+  const hasCreatedRef = useRef(false);
+  const prevStepSeqRef = useRef<string>("");
 
-  // Auto-detect starting step: earliest modified → earliest non-completed → "0001"
-  const autoFromStep = useMemo(
-    () =>
-      localSteps.find((s) => s.status === "modified")?.step_seq ??
-      localSteps.find((s) => s.status !== "completed")?.step_seq ??
-      "0001",
-    [localSteps],
+  // Cleanup on unmount
+  useEffect(
+    () => () => {
+      if (pollingTimerRef.current) clearTimeout(pollingTimerRef.current);
+      if (execTimerRef.current) clearInterval(execTimerRef.current);
+    },
+    [],
   );
-  const hasModified = useMemo(
-    () => localSteps.some((s) => s.status === "modified"),
-    [localSteps],
-  );
 
-  // Cleanup timers on unmount
-  useEffect(() => () => {
-    if (pollingTimerRef.current) clearTimeout(pollingTimerRef.current);
-    if (execTimerRef.current) clearInterval(execTimerRef.current);
-  }, []);
-
+  // Auto-scroll chat
   useEffect(() => {
-    if (plan?.steps) {
-      setLocalSteps(plan.steps);
-    }
-  }, [plan?.steps]);
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chatMessages]);
 
-  // Auto-create BuildPlan when navigated here with a session but no plan yet
+  // Fetch drawing image URL
   useEffect(() => {
-    if (sessionId && !plan && !isCreating) {
-      handleCreatePlan();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId]);
+    if (!sessionId || !idToken) return;
+    fetch(`${API_BASE}/sessions/${sessionId}/drawing`, {
+      headers: { Authorization: `Bearer ${idToken}` },
+    })
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.url) setDrawingUrl(d.url);
+      })
+      .catch(() => {});
+  }, [sessionId, idToken]);
 
-  // --- Poll plan status until planned or failed ---
+  // --- Poll plan status ---
   const startPolling = useCallback(
-    (
-      planId: string,
-      onDone: (planData: Record<string, unknown>, steps: BuildStep[]) => void,
-      onError: (msg: string) => void,
-    ) => {
+    (pid: string) => {
+      if (pollingTimerRef.current) clearTimeout(pollingTimerRef.current);
       const poll = async () => {
         try {
-          const planRes = await fetch(`${API_BASE}/build-plans/${planId}`, {
+          const r = await fetch(`${API_BASE}/build-plans/${pid}`, {
             headers: { Authorization: `Bearer ${idToken}` },
           });
-          if (!planRes.ok) {
+          if (!r.ok) {
             pollingTimerRef.current = setTimeout(poll, 3000);
             return;
           }
-          const planData = await planRes.json();
-          if (planData.plan_status === "planned") {
-            const stepsRes = await fetch(`${API_BASE}/build-plans/${planId}/steps`, {
-              headers: { Authorization: `Bearer ${idToken}` },
-            });
-            if (!stepsRes.ok) {
-              onError("ステップ取得に失敗しました");
-              return;
-            }
-            const stepsData = await stepsRes.json();
-            onDone(planData as Record<string, unknown>, stepsData.steps ?? []);
-          } else if (planData.plan_status === "failed") {
-            onError(planData.reasoning || "BuildPlan 処理に失敗しました");
-          } else {
-            // Still creating or modifying — keep polling
-            pollingTimerRef.current = setTimeout(poll, 3000);
+          const data = await r.json();
+          const ps: PollState = {
+            plan_status: data.plan_status ?? "",
+            current_step_seq: data.current_step_seq ?? "",
+            current_step_status: data.current_step_status ?? "",
+            reasoning: data.reasoning ?? "",
+          };
+          setPollState(ps);
+
+          if (ps.plan_status === "failed") {
+            setError(ps.reasoning || "BuildPlan の処理に失敗しました");
+            setIsWaiting(false);
+            return;
           }
+
+          if (
+            ps.plan_status === "interactive" &&
+            ps.current_step_status === "ready" &&
+            ps.current_step_seq &&
+            ps.current_step_seq !== prevStepSeqRef.current
+          ) {
+            prevStepSeqRef.current = ps.current_step_seq;
+            try {
+              const sr = await fetch(
+                `${API_BASE}/build-plans/${pid}/steps/${ps.current_step_seq}`,
+                { headers: { Authorization: `Bearer ${idToken}` } },
+              );
+              if (sr.ok) {
+                const step: BuildStep = await sr.json();
+                setCurrentStep(step);
+                setIsWaiting(false);
+                const explanation = step.ai_reasoning || "このステップを提案します。";
+                const stepLabel = STEP_TYPE_LABEL[step.step_type] ?? step.step_type;
+                const content = `Step ${step.step_seq} — ${step.step_name} (${stepLabel})\n\n${explanation}`;
+                setChatMessages((prev) => [
+                  ...prev.filter((m) => m.role !== "system" || !m.content.includes("生成中")),
+                  {
+                    id: `ai-${step.step_seq}-${Date.now()}`,
+                    role: "ai",
+                    content,
+                    choices: (step.choices ?? []).length > 0 ? step.choices : undefined,
+                  },
+                ]);
+              } else {
+                pollingTimerRef.current = setTimeout(poll, 3000);
+              }
+            } catch {
+              pollingTimerRef.current = setTimeout(poll, 3000);
+            }
+            return;
+          }
+
+          if (ps.plan_status === "interactive" && ps.current_step_status === "done") {
+            setIsWaiting(false);
+            setCurrentStep(null);
+            setChatMessages((prev) => [
+              ...prev.filter((m) => m.role !== "system" || !m.content.includes("生成中")),
+              {
+                id: `sys-done-${Date.now()}`,
+                role: "system",
+                content: "✓ 全ステップが確定しました。右上の「3D 生成」ボタンで実行できます。",
+              },
+            ]);
+            return;
+          }
+
+          // Still creating / generating / revising — keep polling
+          pollingTimerRef.current = setTimeout(poll, 3000);
         } catch {
-          // Retry on network error
           pollingTimerRef.current = setTimeout(poll, 3000);
         }
       };
-      pollingTimerRef.current = setTimeout(poll, 3000);
+      pollingTimerRef.current = setTimeout(poll, 2000);
     },
     [idToken],
   );
 
   // --- Create BuildPlan ---
   const handleCreatePlan = useCallback(async () => {
+    if (hasCreatedRef.current) return;
+    hasCreatedRef.current = true;
     setIsCreating(true);
     setError(null);
-    setExecutionLog(["AI が図面を分析中... (1〜2分かかる場合があります)"]);
     try {
-      const res = await fetch(`${API_BASE}/sessions/${sessionId}/build-plans`, {
+      const r = await fetch(`${API_BASE}/sessions/${sessionId}/build-plans`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${idToken}`,
-        },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
       });
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error ?? "BuildPlan 作成に失敗");
+      if (!r.ok) {
+        const d = await r.json();
+        throw new Error(d.error ?? "BuildPlan 作成に失敗");
       }
-      const { plan_id: planId } = await res.json();
-      // Backend returns 202 — poll until status = "planned"
-      startPolling(
-        planId,
-        (planData, steps) => {
-          onPlanCreated({
-            plan_id: planId,
-            session_id: String(planData.session_id ?? ""),
-            node_id: String(planData.node_id ?? ""),
-            total_steps: steps.length,
-            reasoning: String(planData.reasoning ?? ""),
-            steps,
-          });
-          setExecutionLog((prev) => [...prev, `BuildPlan 作成完了: ${steps.length} ステップ`]);
-          setIsCreating(false);
+      const { plan_id: pid, node_id: nid } = await r.json();
+      setPlanId(pid);
+      if (nid) setNodeId(nid);
+      onPlanCreated({
+        plan_id: pid,
+        session_id: sessionId,
+        node_id: nid ?? "",
+        total_steps: 0,
+        reasoning: "",
+        steps: [],
+      });
+      setIsCreating(false);
+      setIsWaiting(true);
+      setChatMessages([
+        {
+          id: "sys-init",
+          role: "system",
+          content: "AI が図面を分析し、最初のステップを生成中です...",
         },
-        (msg) => {
-          setError(msg);
-          setExecutionLog((prev) => [...prev, `エラー: ${msg}`]);
-          setIsCreating(false);
-        },
-      );
+      ]);
+      startPolling(pid);
     } catch (e) {
       setError(String(e));
-      setExecutionLog((prev) => [...prev, `エラー: ${e}`]);
       setIsCreating(false);
+      hasCreatedRef.current = false;
     }
   }, [sessionId, idToken, onPlanCreated, startPolling]);
 
-  // --- Execute Plan (with confirmation) ---
-  const handleConfirmExecute = useCallback(async () => {
-    if (!plan) return;
-    setShowExecConfirm(false);
-    setIsExecuting(true);
-    setExecElapsed(0);
-    setError(null);
-    execTimerRef.current = setInterval(() => setExecElapsed((p) => p + 1), 1000);
-    setExecutionLog((prev) => [...prev, `Step ${autoFromStep} から実行開始...`]);
+  // Auto-create on mount
+  useEffect(() => {
+    if (sessionId && idToken && !planId && !isCreating) {
+      handleCreatePlan();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, idToken]);
+
+  // --- Confirm step ---
+  const handleConfirm = useCallback(async () => {
+    if (!planId || !currentStep) return;
+    const step = currentStep;
+    setCurrentStep(null);
+    setConfirmedSteps((prev) => [...prev, step]);
+    setChatMessages((prev) => [
+      ...prev,
+      { id: `user-ok-${Date.now()}`, role: "user", content: "OK ✓  次のステップへ進みます" },
+      { id: `sys-gen-${Date.now()}`, role: "system", content: "次のステップを生成中..." },
+    ]);
+    setIsWaiting(true);
     try {
-      const res = await fetch(`${API_BASE}/build-plans/${plan.plan_id}/execute`, {
+      await fetch(`${API_BASE}/build-plans/${planId}/steps/${step.step_seq}/confirm`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${idToken}`,
-        },
-        body: JSON.stringify({ from_step: autoFromStep }),
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
       });
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error ?? "実行に失敗");
-      }
-      const data = await res.json();
-      if (data.results) {
-        setLocalSteps((prev) =>
-          prev.map((s) => {
-            const result = data.results.find((r: { step_seq: string }) => r.step_seq === s.step_seq);
-            return result ? { ...s, status: result.status } : s;
-          }),
-        );
-      }
-      setExecutionLog((prev) => [...prev, `実行完了: ${data.executed_count} ステップ`]);
-      if (data.gltf_url) {
-        onExecutionComplete(data.gltf_url, plan.node_id);
-      }
+      startPolling(planId);
     } catch (e) {
       setError(String(e));
-      setExecutionLog((prev) => [...prev, `実行エラー: ${e}`]);
+      setIsWaiting(false);
+    }
+  }, [planId, currentStep, idToken, startPolling]);
+
+  // --- Revise step ---
+  const handleRevise = useCallback(
+    async (instruction: string) => {
+      if (!planId || !currentStep || !instruction.trim()) return;
+      const msg = instruction.trim();
+      setUserInput("");
+      setChatMessages((prev) => [
+        ...prev,
+        { id: `user-rev-${Date.now()}`, role: "user", content: msg },
+        { id: `sys-rev-${Date.now()}`, role: "system", content: "AI が修正案を生成中..." },
+      ]);
+      setIsWaiting(true);
+      try {
+        await fetch(
+          `${API_BASE}/build-plans/${planId}/steps/${currentStep.step_seq}/revise`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
+            body: JSON.stringify({ instruction: msg }),
+          },
+        );
+        prevStepSeqRef.current = ""; // Allow re-fetch of same seq after revision
+        startPolling(planId);
+      } catch (e) {
+        setError(String(e));
+        setIsWaiting(false);
+      }
+    },
+    [planId, currentStep, idToken, startPolling],
+  );
+
+  // --- Execute plan ---
+  const handleExecute = useCallback(async () => {
+    if (!planId) return;
+    setIsExecuting(true);
+    setExecElapsed(0);
+    execTimerRef.current = setInterval(() => setExecElapsed((p) => p + 1), 1000);
+    try {
+      const r = await fetch(`${API_BASE}/build-plans/${planId}/execute`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
+        body: JSON.stringify({ from_step: "0001" }),
+      });
+      if (!r.ok) {
+        const d = await r.json();
+        throw new Error(d.error ?? "実行に失敗");
+      }
+      const data = await r.json();
+      if (data.gltf_url) onExecutionComplete(data.gltf_url, nodeId);
+    } catch (e) {
+      setError(String(e));
     } finally {
       if (execTimerRef.current) {
         clearInterval(execTimerRef.current);
@@ -275,594 +402,345 @@ export function BuildPlanPanel({
       }
       setIsExecuting(false);
     }
-  }, [plan, autoFromStep, idToken, onExecutionComplete]);
+  }, [planId, nodeId, idToken, onExecutionComplete]);
 
-  // --- Modify Step ---
-  const handleModifyByParams = useCallback(async () => {
-    if (!plan || !selectedStep) return;
-    setIsModifying(true);
-    setError(null);
-    setExecutionLog((prev) => [...prev, `Step ${selectedStep} パラメータ修正中...`]);
-    try {
-      const params: Record<string, { value: number | string; unit: string; source: string; confidence: number }> = {};
-      for (const [key, val] of Object.entries(editingParams)) {
-        const numVal = parseFloat(val);
-        params[key] = { value: isNaN(numVal) ? val : numVal, unit: "mm", source: "user", confidence: 1.0 };
-      }
-      const res = await fetch(
-        `${API_BASE}/build-plans/${plan.plan_id}/steps/${selectedStep}/modify`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
-          body: JSON.stringify({ type: "parameter", parameters: params }),
-        },
-      );
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error ?? "修正に失敗");
-      }
-      const { plan_id: planId } = await res.json();
-      // Backend returns 202 — poll until status = "planned"
-      const targetStepSeq = selectedStep; // capture for closure
-      startPolling(
-        planId,
-        (_planData, steps) => {
-          setLocalSteps(steps);
-          // Reset editingParams to reflect the new persisted values
-          const updated = steps.find((s) => s.step_seq === targetStepSeq);
-          if (updated) {
-            const newParams: Record<string, string> = {};
-            for (const [k, v] of Object.entries(updated.parameters)) {
-              newParams[k] = String((v as StepParameter).value);
-            }
-            setEditingParams(newParams);
-          }
-          setExecutionLog((prev) => [...prev, `修正完了: ${steps.length} ステップ更新`]);
-          setIsModifying(false);
-        },
-        (msg) => {
-          setError(msg);
-          setIsModifying(false);
-        },
-      );
-    } catch (e) {
-      setError(String(e));
-      setIsModifying(false);
-    }
-  }, [plan, selectedStep, editingParams, idToken, startPolling]);
-
-  const handleModifyByChat = useCallback(async () => {
-    if (!plan || !selectedStep || !chatInput.trim()) return;
-    setIsModifying(true);
-    setError(null);
-    const instruction = chatInput.trim();
-    setChatInput("");
-    setExecutionLog((prev) => [...prev, `AI修正: 「${instruction}」`]);
-    try {
-      const res = await fetch(
-        `${API_BASE}/build-plans/${plan.plan_id}/steps/${selectedStep}/modify`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
-          body: JSON.stringify({ type: "natural_language", instruction }),
-        },
-      );
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error ?? "修正に失敗");
-      }
-      const { plan_id: planId } = await res.json();
-      // Backend returns 202 — poll until status = "planned"
-      startPolling(
-        planId,
-        (_planData, steps) => {
-          setLocalSteps(steps);
-          setExecutionLog((prev) => [...prev, `AI修正完了: ${steps.length} ステップ更新`]);
-          setIsModifying(false);
-        },
-        (msg) => {
-          setError(msg);
-          setIsModifying(false);
-        },
-      );
-    } catch (e) {
-      setError(String(e));
-      setIsModifying(false);
-    }
-  }, [plan, selectedStep, chatInput, idToken, startPolling]);
-
-  // --- Select step ---
-  const handleStepClick = useCallback(
-    (stepSeq: string) => {
-      setSelectedStep(stepSeq === selectedStep ? null : stepSeq);
-      setEditingParams({});
-      const step = localSteps.find((s) => s.step_seq === stepSeq);
-      if (step) {
-        const params: Record<string, string> = {};
-        for (const [key, val] of Object.entries(step.parameters)) {
-          const p = val as StepParameter;
-          params[key] = String(p.value);
-        }
-        setEditingParams(params);
-      }
-    },
-    [selectedStep, localSteps],
+  // All steps for 3D preview (confirmed + proposed current)
+  const allPreviewSteps = useMemo(
+    () => [...confirmedSteps, ...(currentStep ? [currentStep] : [])],
+    [confirmedSteps, currentStep],
   );
 
-  // --- Toggle batch check ---
-  const toggleCheck = useCallback(
-    (stepSeq: string) => {
-      setCheckedSteps((prev) => {
-        const next = new Set(prev);
-        if (next.has(stepSeq)) {
-          next.delete(stepSeq);
-          setBatchParams((p) => {
-            const q = { ...p };
-            delete q[stepSeq];
-            return q;
-          });
-        } else {
-          next.add(stepSeq);
-          const step = localSteps.find((s) => s.step_seq === stepSeq);
-          if (step) {
-            const params: Record<string, string> = {};
-            for (const [k, v] of Object.entries(step.parameters)) {
-              params[k] = String((v as StepParameter).value);
-            }
-            setBatchParams((p) => ({ ...p, [stepSeq]: params }));
-          }
-        }
-        return next;
-      });
-    },
-    [localSteps],
-  );
+  const isDone = pollState?.current_step_status === "done";
+  const waitingLabel =
+    pollState?.current_step_status === "revising"
+      ? "修正案を生成中..."
+      : isCreating || pollState?.plan_status === "creating"
+      ? "図面を分析中..."
+      : "次のステップを生成中...";
 
-  // --- Batch modify ---
-  const handleBatchModify = useCallback(async () => {
-    if (!plan || (checkedSteps.size === 0 && !batchInstruction.trim())) return;
-    setIsModifying(true);
-    setError(null);
-    setExecutionLog((prev) => [...prev, `${checkedSteps.size} ステップを一括修正中...`]);
+  // ---------------------------------------------------------------------------
+  // Early render: creating plan
+  if (isCreating && !planId) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6">
+        <div className="h-10 w-10 animate-spin rounded-full border-4 border-indigo-200 border-t-indigo-600" />
+        <p className="text-sm font-semibold text-gray-700">図面を分析中...</p>
+        <p className="text-xs text-gray-400">AI が構築プランを生成しています（1〜2分かかる場合があります）</p>
+      </div>
+    );
+  }
 
-    const modifications = Array.from(checkedSteps).map((seq) => {
-      const rawParams = batchParams[seq] ?? {};
-      if (Object.keys(rawParams).length === 0) return { step_seq: seq };
-      const params: Record<string, { value: number | string; unit: string; source: string; confidence: number }> = {};
-      for (const [key, val] of Object.entries(rawParams)) {
-        const numVal = parseFloat(val);
-        params[key] = { value: isNaN(numVal) ? val : numVal, unit: "mm", source: "user", confidence: 1.0 };
-      }
-      return { step_seq: seq, parameters: params };
-    });
-
-    try {
-      const res = await fetch(`${API_BASE}/build-plans/${plan.plan_id}/modify`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
-        body: JSON.stringify({ modifications, instruction: batchInstruction }),
-      });
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error ?? "修正に失敗");
-      }
-      const { plan_id: planId } = await res.json();
-      const seqsAtSubmit = new Set(checkedSteps);
-      startPolling(
-        planId,
-        (_planData, steps) => {
-          setLocalSteps(steps);
-          const newBatchParams: Record<string, Record<string, string>> = {};
-          for (const seq of seqsAtSubmit) {
-            const updated = steps.find((s) => s.step_seq === seq);
-            if (updated) {
-              const p: Record<string, string> = {};
-              for (const [k, v] of Object.entries(updated.parameters)) {
-                p[k] = String((v as StepParameter).value);
-              }
-              newBatchParams[seq] = p;
-            }
-          }
-          setBatchParams(newBatchParams);
-          setBatchInstruction("");
-          setExecutionLog((prev) => [...prev, `一括修正完了: ${steps.length} ステップ更新`]);
-          setIsModifying(false);
-        },
-        (msg) => {
-          setError(msg);
-          setIsModifying(false);
-        },
-      );
-    } catch (e) {
-      setError(String(e));
-      setIsModifying(false);
-    }
-  }, [plan, checkedSteps, batchParams, batchInstruction, idToken, startPolling]);
-
-  // --- No plan yet: show loading / retry ---
-  if (!plan) {
+  if (!planId) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-4 p-6">
-        {isCreating ? (
-          <div className="text-center">
-            <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-4 border-indigo-200 border-t-indigo-600" />
-            <h2 className="text-base font-semibold text-gray-800">BuildPlan を作成中...</h2>
-            <p className="mt-1 text-sm text-gray-500">
-              AI が図面を分析し、段階的構築プランを生成しています
+        <p className="text-sm text-gray-600">段階的構築モード</p>
+        {error && (
+          <>
+            <p className="text-xs text-red-600" role="alert">
+              {error}
             </p>
-            {executionLog.length > 0 && (
-              <p className="mt-3 text-xs text-indigo-600">{executionLog[executionLog.length - 1]}</p>
-            )}
-          </div>
-        ) : (
-          <div className="text-center">
-            <h2 className="text-lg font-semibold text-gray-800">段階的構築モード</h2>
-            <p className="mt-1 text-sm text-gray-500">
-              AIが図面を分析し、1ステップずつ3Dモデルを構築します
-            </p>
-            {error && (
-              <p className="mt-3 text-sm text-red-600" role="alert">{error}</p>
-            )}
             <button
               type="button"
-              onClick={handleCreatePlan}
-              disabled={!sessionId}
-              className="mt-4 rounded-lg bg-indigo-600 px-6 py-2.5 text-sm font-medium text-white shadow-sm hover:bg-indigo-700 disabled:opacity-50"
+              onClick={() => {
+                hasCreatedRef.current = false;
+                handleCreatePlan();
+              }}
+              className="rounded bg-indigo-600 px-4 py-2 text-xs font-medium text-white hover:bg-indigo-700"
             >
               再試行
             </button>
-          </div>
+          </>
         )}
       </div>
     );
   }
 
-  // --- Plan exists: show steps ---
-  const selectedStepData = localSteps.find((s) => s.step_seq === selectedStep);
-
+  // ---------------------------------------------------------------------------
+  // Main layout: 60 / 40 split
+  // ---------------------------------------------------------------------------
   return (
-    <div className="relative flex flex-1 flex-col overflow-hidden">
-      {/* Confirmation dialog */}
-      {showExecConfirm && (
-        <div
-          className="absolute inset-0 z-50 flex items-center justify-center bg-black/60"
-          role="dialog"
-          aria-modal="true"
-        >
-          <div className="w-80 rounded-2xl bg-white p-6 shadow-2xl">
-            <h3 className="text-sm font-bold text-gray-900">3D モデルを生成しますか？</h3>
-            <p className="mt-2 text-xs text-gray-600">
-              {hasModified ? (
-                <>
-                  Step{" "}
-                  <span className="font-semibold text-amber-600">{autoFromStep}</span>{" "}
-                  以降を再実行します（修正済みステップを検出しました）。
-                </>
-              ) : (
-                <>
-                  Step{" "}
-                  <span className="font-semibold text-gray-800">{autoFromStep}</span>{" "}
-                  から実行します。
-                </>
-              )}
-            </p>
-            <p className="mt-1 text-xs text-gray-500">
-              CadQuery でステップを順番に処理します。形状の複雑さによって数十秒〜数分かかる場合があります。
-            </p>
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setShowExecConfirm(false)}
-                className="rounded-lg border px-4 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
-              >
-                キャンセル
-              </button>
-              <button
-                type="button"
-                onClick={handleConfirmExecute}
-                className="rounded-lg bg-green-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-green-700"
-              >
-                実行する
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Execution progress overlay */}
+    <div className="relative flex h-full w-full overflow-hidden">
+      {/* Execution overlay */}
       {isExecuting && (
-        <div className="absolute inset-0 z-40 flex flex-col items-center justify-center bg-gray-950/85 backdrop-blur-sm">
+        <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-gray-950/85 backdrop-blur-sm">
           <div className="h-10 w-10 animate-spin rounded-full border-4 border-green-800 border-t-green-400" />
           <p className="mt-4 text-sm font-semibold text-white">3D モデル生成中...</p>
-          <p className="mt-1 text-xs text-gray-400">CadQuery がステップを順番に処理しています</p>
           <p className="mt-1 font-mono text-xs text-green-400">経過: {execElapsed} 秒</p>
-          {executionLog.length > 0 && (
-            <p className="mt-2 max-w-xs truncate text-center text-[10px] text-gray-500">
-              {executionLog[executionLog.length - 1]}
-            </p>
-          )}
         </div>
       )}
 
-      {/* Header */}
-      <div className="flex items-center gap-2 border-b bg-indigo-50 px-4 py-2">
-        <span className="text-xs font-semibold text-indigo-700">
-          BuildPlan ({plan.total_steps} ステップ)
-        </span>
-        <div className="ml-auto flex items-center gap-2">
-          {hasModified && (
-            <span className="text-[10px] text-amber-600">✎ Step {autoFromStep} から再実行</span>
-          )}
-          <button
-            type="button"
-            onClick={() => setShowExecConfirm(true)}
-            disabled={isExecuting || localSteps.length === 0}
-            className="rounded bg-green-600 px-3 py-1 text-xs font-medium text-white hover:bg-green-700 disabled:opacity-50"
-          >
-            3D 生成
-          </button>
+      {/* ── Left 60%: 2D drawing (top) + 3D preview (bottom) ── */}
+      <div className="flex h-full flex-col border-r" style={{ width: "60%" }}>
+        {/* Top half: 2D drawing */}
+        <div className="flex min-h-0 flex-1 flex-col border-b">
+          <div className="flex h-6 shrink-0 items-center border-b bg-gray-50 px-3">
+            <span className="text-[10px] font-semibold text-gray-500">2D 図面</span>
+          </div>
+          <div className="min-h-0 flex-1">
+            <DrawingViewer url={drawingUrl} />
+          </div>
+        </div>
+        {/* Bottom half: 3D preview */}
+        <div className="flex min-h-0 flex-1 flex-col">
+          <div className="flex h-6 shrink-0 items-center border-b bg-gray-50 px-3">
+            <span className="text-[10px] font-semibold text-gray-500">
+              3D プレビュー
+              {confirmedSteps.length > 0 && (
+                <span className="ml-1 text-indigo-500">
+                  （{confirmedSteps.length} ステップ確定済み）
+                </span>
+              )}
+            </span>
+          </div>
+          <div className="min-h-0 flex-1">
+            <StepPreview3D
+              step={allPreviewSteps.at(-1) ?? null}
+              allSteps={allPreviewSteps}
+              planId={planId}
+              idToken={idToken}
+            />
+          </div>
         </div>
       </div>
 
-      {/* Step list */}
-      <div className="flex flex-1 min-h-0 overflow-hidden">
-        <div className="w-52 shrink-0 overflow-y-auto border-r" role="list" aria-label="構築ステップ一覧">
-          {localSteps.map((step) => {
-            const isSelected = step.step_seq === selectedStep;
-            const isChecked = checkedSteps.has(step.step_seq);
-            return (
-              <div
-                key={step.step_seq}
-                className={`flex items-stretch border-b transition-colors ${
-                  isChecked
-                    ? "bg-violet-50 ring-1 ring-inset ring-violet-300"
-                    : isSelected
-                    ? "bg-indigo-50 ring-1 ring-inset ring-indigo-300"
-                    : "hover:bg-gray-50"
-                }`}
+      {/* ── Right 40%: Tab panel ── */}
+      <div className="flex h-full flex-col" style={{ width: "40%" }}>
+        {/* Tab header */}
+        <div className="flex shrink-0 items-center border-b bg-gray-50">
+          <button
+            type="button"
+            onClick={() => setActiveTab("chat")}
+            className={`px-4 py-2 text-xs font-semibold transition-colors ${
+              activeTab === "chat"
+                ? "border-b-2 border-indigo-600 text-indigo-700"
+                : "text-gray-500 hover:text-gray-700"
+            }`}
+          >
+            チャット
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("step")}
+            className={`px-4 py-2 text-xs font-semibold transition-colors ${
+              activeTab === "step"
+                ? "border-b-2 border-indigo-600 text-indigo-700"
+                : "text-gray-500 hover:text-gray-700"
+            }`}
+          >
+            ステップ情報
+          </button>
+          {/* Execute button (visible when all steps are done) */}
+          {isDone && (
+            <div className="ml-auto flex items-center pr-2">
+              <button
+                type="button"
+                onClick={handleExecute}
+                disabled={isExecuting}
+                className="rounded bg-green-600 px-3 py-1 text-xs font-medium text-white hover:bg-green-700 disabled:opacity-50"
               >
-                <label className="flex shrink-0 cursor-pointer items-start px-2 pt-2.5">
-                  <input
-                    type="checkbox"
-                    checked={isChecked}
-                    onChange={() => toggleCheck(step.step_seq)}
-                    className="h-3.5 w-3.5 cursor-pointer rounded border-gray-300 text-violet-600 focus:ring-violet-400"
-                  />
-                </label>
+                3D 生成
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* ── Chat tab ── */}
+        {activeTab === "chat" && (
+          <div className="flex min-h-0 flex-1 flex-col">
+            {/* Message list */}
+            <div className="flex-1 overflow-y-auto bg-gray-50 px-3 py-3">
+              {chatMessages.map((msg) => (
+                <ChatBubble key={msg.id} message={msg} />
+              ))}
+
+              {/* AI choices for current step */}
+              {!isWaiting && currentStep && (currentStep.choices ?? []).length > 0 && (
+                <div className="mb-3 ml-1 flex flex-wrap gap-1.5">
+                  {(currentStep.choices ?? []).map((c) => (
+                    <button
+                      key={c.id}
+                      type="button"
+                      onClick={() => handleRevise(c.label)}
+                      className="rounded-full border border-indigo-300 bg-white px-3 py-1 text-xs text-indigo-700 hover:bg-indigo-50"
+                    >
+                      {c.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Waiting spinner */}
+              {isWaiting && (
+                <div className="mb-2 flex items-center gap-2 text-[10px] text-gray-400">
+                  <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-gray-300 border-t-indigo-500" />
+                  {waitingLabel}
+                </div>
+              )}
+
+              <div ref={chatEndRef} />
+            </div>
+
+            {/* Input area */}
+            <div className="shrink-0 border-t bg-white px-3 py-2">
+              {error && (
+                <p className="mb-1 text-[10px] text-red-600" role="alert">
+                  {error}
+                </p>
+              )}
+
+              {/* OK button when step is ready */}
+              {!isWaiting && currentStep && (
                 <button
                   type="button"
-                  role="listitem"
-                  onClick={() => handleStepClick(step.step_seq)}
-                  className="flex flex-1 items-start gap-2 py-2 pr-3 text-left"
-                  aria-selected={isSelected}
+                  onClick={handleConfirm}
+                  className="mb-2 w-full rounded-lg bg-indigo-600 py-2 text-xs font-semibold text-white hover:bg-indigo-700"
                 >
-                  <span className={`mt-0.5 text-sm font-bold ${STATUS_COLOR[step.status] ?? "text-gray-400"}`}>
-                    {STATUS_ICON[step.status] ?? "?"}
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-[10px] font-mono text-gray-400">{step.step_seq}</span>
-                      {step.step_seq === autoFromStep && (
-                        <span className="rounded bg-green-100 px-1 text-[9px] font-bold text-green-700">▶</span>
-                      )}
-                      <span className="rounded bg-gray-100 px-1 text-[10px] text-gray-500">
-                        {STEP_TYPE_LABEL[step.step_type] ?? step.step_type}
-                      </span>
-                      {step.group_id && (
-                        <span className="rounded bg-blue-50 px-1 text-[10px] text-blue-500">
-                          {step.group_id}
-                        </span>
-                      )}
-                    </div>
-                    <p className="truncate text-xs font-medium text-gray-800">{step.step_name}</p>
-                    {step.confidence < 0.85 && (
-                      <span className="text-[10px] text-amber-600">
-                        確度: {(step.confidence * 100).toFixed(0)}%
+                  ✓ OK — 次のステップへ
+                </button>
+              )}
+
+              {/* Done state message */}
+              {!isWaiting && isDone && (
+                <p className="mb-2 text-center text-xs font-semibold text-green-600">
+                  全ステップ確定 — 「3D 生成」ボタンで実行
+                </p>
+              )}
+
+              {/* Free text input */}
+              <div className="flex gap-1.5">
+                <textarea
+                  value={userInput}
+                  onChange={(e) => setUserInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey && userInput.trim()) {
+                      e.preventDefault();
+                      handleRevise(userInput);
+                    }
+                  }}
+                  placeholder={
+                    currentStep
+                      ? "指摘・修正内容を入力（Enter 送信 / Shift+Enter 改行）"
+                      : isWaiting
+                      ? "AI が処理中です..."
+                      : "メッセージを入力"
+                  }
+                  disabled={isWaiting || !currentStep}
+                  rows={2}
+                  className="flex-1 resize-none rounded-lg border border-gray-300 px-2 py-1.5 text-xs focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 disabled:bg-gray-50 disabled:text-gray-400"
+                />
+                <button
+                  type="button"
+                  onClick={() => handleRevise(userInput)}
+                  disabled={isWaiting || !userInput.trim() || !currentStep}
+                  className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+                >
+                  送信
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── Step info tab ── */}
+        {activeTab === "step" && (
+          <div className="flex-1 overflow-y-auto px-3 py-3">
+            {currentStep ? (
+              <div className="space-y-3">
+                <div>
+                  <div className="mb-1 flex items-center gap-2">
+                    <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700">
+                      {STEP_TYPE_LABEL[currentStep.step_type] ?? currentStep.step_type}
+                    </span>
+                    <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] text-amber-600">
+                      提案中
+                    </span>
+                    {currentStep.confidence < 0.85 && (
+                      <span className="rounded bg-red-50 px-1 text-[9px] text-red-600">
+                        確度 {(currentStep.confidence * 100).toFixed(0)}%
                       </span>
                     )}
                   </div>
-                </button>
-              </div>
-            );
-          })}
-        </div>
+                  <h3 className="text-sm font-semibold text-gray-800">{currentStep.step_name}</h3>
+                  {currentStep.ai_reasoning && (
+                    <p className="mt-1 text-[11px] leading-relaxed text-gray-500">
+                      {currentStep.ai_reasoning}
+                    </p>
+                  )}
+                </div>
 
-        {/* 3D Preview (center) */}
-        <div className="relative flex-1 min-w-0 border-r">
-          <StepPreview3D
-            step={selectedStepData ?? null}
-            allSteps={localSteps}
-            planId={plan.plan_id}
-            idToken={idToken}
-          />
-        </div>
-
-        {/* Detail / Edit panel */}
-        <div className="flex w-64 shrink-0 flex-col overflow-y-auto">
-          {checkedSteps.size > 0 ? (
-            <div className="flex flex-col gap-3 p-3">
-              {/* Batch header */}
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-semibold text-violet-700">
-                  {checkedSteps.size} ステップを一括修正
-                </span>
-                <button
-                  type="button"
-                  onClick={() => { setCheckedSteps(new Set()); setBatchParams({}); setBatchInstruction(""); }}
-                  className="text-xs text-gray-400 hover:text-gray-600"
-                >
-                  選択クリア
-                </button>
-              </div>
-              {/* Per-step parameter editors */}
-              {Array.from(checkedSteps).sort().map((seq) => {
-                const step = localSteps.find((s) => s.step_seq === seq);
-                if (!step) return null;
-                return (
-                  <details key={seq} open className="rounded border">
-                    <summary className="cursor-pointer bg-gray-50 px-2 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-100">
-                      {seq} · {step.step_name}
-                    </summary>
-                    <div className="space-y-1.5 p-2">
-                      {Object.entries(step.parameters).map(([key, val]) => {
-                        const p = val as StepParameter;
-                        return (
-                          <label key={key} className="flex items-center gap-2 text-xs">
-                            <span className="w-24 truncate font-medium text-gray-700" title={key}>{key}</span>
-                            <input
-                              type="text"
-                              value={batchParams[seq]?.[key] ?? String(p.value)}
-                              onChange={(e) =>
-                                setBatchParams((prev) => ({
-                                  ...prev,
-                                  [seq]: { ...(prev[seq] ?? {}), [key]: e.target.value },
-                                }))
-                              }
-                              className="flex-1 rounded border border-gray-300 px-2 py-1 text-xs focus:border-violet-400 focus:ring-1 focus:ring-violet-400"
-                              disabled={isModifying}
-                            />
-                            <span className="w-8 text-[10px] text-gray-400">{p.unit}</span>
-                          </label>
-                        );
-                      })}
-                    </div>
-                  </details>
-                );
-              })}
-              {/* NL instruction */}
-              <div className="rounded border p-2">
-                <p className="mb-1 text-[10px] font-semibold text-gray-500">自然言語での追加指示（任意）</p>
-                <textarea
-                  value={batchInstruction}
-                  onChange={(e) => setBatchInstruction(e.target.value)}
-                  placeholder="例: 全ての穴を同じ直径にそろえてください"
-                  className="w-full rounded border border-gray-300 px-2 py-1.5 text-xs focus:border-violet-400 focus:ring-1 focus:ring-violet-400"
-                  rows={2}
-                  disabled={isModifying}
-                />
-              </div>
-              {/* Submit */}
-              <button
-                type="button"
-                onClick={handleBatchModify}
-                disabled={isModifying}
-                className="w-full rounded bg-violet-600 py-2 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-50"
-              >
-                {isModifying ? "AI修正中..." : `${checkedSteps.size} ステップを一括修正`}
-              </button>
-            </div>
-          ) : selectedStepData ? (
-            <div className="flex flex-col gap-3 p-3">
-              {/* Step info */}
-              <div>
-                <h3 className="text-sm font-semibold text-gray-800">{selectedStepData.step_name}</h3>
-                {selectedStepData.ai_reasoning && (
-                  <p className="mt-1 text-[11px] text-gray-500">{selectedStepData.ai_reasoning}</p>
-                )}
-              </div>
-
-              {/* Parameter editor */}
-              <fieldset className="rounded border p-2">
-                <legend className="px-1 text-[10px] font-semibold text-gray-500">パラメータ</legend>
-                <div className="space-y-1.5">
-                  {Object.entries(selectedStepData.parameters).map(([key, val]) => {
-                    const p = val as StepParameter;
-                    return (
-                      <label key={key} className="flex items-center gap-2 text-xs">
-                        <span className="w-28 truncate font-medium text-gray-700" title={key}>{key}</span>
-                        <input
-                          type="text"
-                          value={editingParams[key] ?? String(p.value)}
-                          onChange={(e) => setEditingParams((prev) => ({ ...prev, [key]: e.target.value }))}
-                          className="flex-1 rounded border border-gray-300 px-2 py-1 text-xs focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400"
-                        />
-                        <span className="w-8 text-[10px] text-gray-400">{p.unit}</span>
-                        {p.source !== "user" && (
+                {/* Parameters */}
+                <fieldset className="rounded border p-2">
+                  <legend className="px-1 text-[10px] font-semibold text-gray-500">パラメータ</legend>
+                  <div className="space-y-1">
+                    {Object.entries(currentStep.parameters).map(([key, val]) => {
+                      const p = val as StepParameter;
+                      return (
+                        <div key={key} className="flex items-center gap-2 text-xs">
+                          <span
+                            className="w-28 truncate font-medium text-gray-700"
+                            title={key}
+                          >
+                            {key}
+                          </span>
+                          <span className="flex-1 text-gray-800">{String(p.value)}</span>
+                          <span className="text-[10px] text-gray-400">{p.unit}</span>
                           <span
                             className={`rounded px-1 text-[9px] ${
-                              p.confidence >= 0.9 ? "bg-green-50 text-green-600" :
-                              p.confidence >= 0.7 ? "bg-amber-50 text-amber-600" :
-                              "bg-red-50 text-red-600"
+                              p.confidence >= 0.9
+                                ? "bg-green-50 text-green-600"
+                                : p.confidence >= 0.7
+                                ? "bg-amber-50 text-amber-600"
+                                : "bg-red-50 text-red-600"
                             }`}
                           >
-                            {p.source} {(p.confidence * 100).toFixed(0)}%
+                            {(p.confidence * 100).toFixed(0)}%
                           </span>
-                        )}
-                      </label>
-                    );
-                  })}
-                </div>
-                <button
-                  type="button"
-                  onClick={handleModifyByParams}
-                  disabled={isModifying}
-                  className="mt-2 w-full rounded bg-amber-500 px-3 py-1 text-xs font-medium text-white hover:bg-amber-600 disabled:opacity-50"
-                >
-                  {isModifying ? "修正中..." : "パラメータで修正"}
-                </button>
-              </fieldset>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </fieldset>
 
-              {/* NL chat modification */}
-              <div className="rounded border p-2">
-                <p className="mb-1 text-[10px] font-semibold text-gray-500">自然言語で修正</p>
-                <div className="flex gap-1">
-                  <input
-                    ref={chatInputRef}
-                    type="text"
-                    value={chatInput}
-                    onChange={(e) => setChatInput(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Enter") handleModifyByChat(); }}
-                    placeholder="例: 直径を8mmに変更"
-                    className="flex-1 rounded border border-gray-300 px-2 py-1 text-xs focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400"
-                    disabled={isModifying}
-                  />
-                  <button
-                    type="button"
-                    onClick={handleModifyByChat}
-                    disabled={isModifying || !chatInput.trim()}
-                    className="rounded bg-indigo-600 px-3 py-1 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
-                  >
-                    送信
-                  </button>
+                {/* CadQuery code */}
+                <details className="rounded border">
+                  <summary className="cursor-pointer px-2 py-1 text-[10px] font-semibold text-gray-500 hover:bg-gray-50">
+                    CadQuery コード
+                  </summary>
+                  <pre className="max-h-40 overflow-auto bg-gray-900 p-2 text-[10px] leading-relaxed text-green-300">
+                    {currentStep.cq_code}
+                  </pre>
+                </details>
+              </div>
+            ) : (
+              <p className="mb-4 text-[10px] text-gray-400">現在提案中のステップはありません</p>
+            )}
+
+            {/* Confirmed steps list */}
+            {confirmedSteps.length > 0 && (
+              <div className={currentStep ? "mt-4" : ""}>
+                <p className="mb-2 text-[10px] font-semibold text-gray-500">
+                  確定済みステップ（{confirmedSteps.length}）
+                </p>
+                <div className="space-y-1">
+                  {confirmedSteps.map((s) => (
+                    <div
+                      key={s.step_seq}
+                      className="flex items-center gap-2 rounded bg-green-50 px-2 py-1.5 text-xs"
+                    >
+                      <span className="font-semibold text-green-600">✓</span>
+                      <span className="font-mono text-[10px] text-gray-400">{s.step_seq}</span>
+                      <span className="flex-1 truncate text-gray-700">{s.step_name}</span>
+                      <span className="text-[10px] text-gray-400">
+                        {STEP_TYPE_LABEL[s.step_type] ?? s.step_type}
+                      </span>
+                    </div>
+                  ))}
                 </div>
               </div>
-
-              {/* CadQuery code preview */}
-              <details className="rounded border">
-                <summary className="cursor-pointer px-2 py-1 text-[10px] font-semibold text-gray-500 hover:bg-gray-50">
-                  CadQuery コード
-                </summary>
-                <pre className="max-h-40 overflow-auto bg-gray-900 p-2 text-[10px] leading-relaxed text-green-300">
-                  {selectedStepData.cq_code}
-                </pre>
-              </details>
-            </div>
-          ) : (
-            <div className="flex flex-1 items-center justify-center p-4 text-center text-xs text-gray-400">
-              ステップをクリックして詳細表示<br />チェックして一括修正
-            </div>
-          )}
-        </div>
+            )}
+          </div>
+        )}
       </div>
-
-      {/* Execution log (AI thinking process) */}
-      {executionLog.length > 0 && (
-        <div className="max-h-24 shrink-0 overflow-y-auto border-t bg-gray-50 px-3 py-2">
-          <p className="mb-1 text-[10px] font-semibold text-gray-500">実行ログ</p>
-          {executionLog.map((log, i) => (
-            <p key={i} className="text-[10px] text-gray-600">
-              <span className="text-gray-400">{String(i + 1).padStart(2, "0")}</span>{" "}
-              {log}
-            </p>
-          ))}
-        </div>
-      )}
-
-      {error && (
-        <div className="shrink-0 border-t bg-red-50 px-3 py-2" role="alert">
-          <p className="text-xs text-red-600">{error}</p>
-        </div>
-      )}
     </div>
   );
 }

@@ -59,7 +59,7 @@ def lambda_handler(event: dict, context) -> dict:
         "created_at": now,
     })
 
-    # Create plan record with status "creating"
+    # Create plan record with status "creating" and interactive mode fields
     plan_id = str(uuid.uuid4())
     plans_table = dynamodb.Table(BUILD_PLANS_TABLE)
     plans_table.put_item(Item={
@@ -69,6 +69,8 @@ def lambda_handler(event: dict, context) -> dict:
         "plan_status": "creating",
         "total_steps": 0,
         "current_step": 0,
+        "current_step_seq": "",
+        "current_step_status": "generating",
         "reasoning": "",
         "created_at": now,
         "updated_at": now,
@@ -96,7 +98,7 @@ def lambda_handler(event: dict, context) -> dict:
         FunctionName=BUILDPLAN_WORKER_FUNCTION_NAME,
         InvocationType="Event",
         Payload=json.dumps({
-            "action": "create",
+            "action": "next_step",
             "plan_id": plan_id,
             "session_id": session_id,
             "node_id": node_id,
