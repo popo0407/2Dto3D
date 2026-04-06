@@ -58,6 +58,8 @@ NEXT_STEP_PROMPT = """添付の2D図面を見て、3Dモデルを段階的に構
 
 【CadQuery 座標系】
 - .box(W, D, H): 原点中心。図面座標(Xd,Yd) → CQ: (Xd-W/2, Yd-H/2)
+- .cylinder(height, radius): ※引数の順序は高さ先・半径後（例: .cylinder(40, 98) = 高さ40, 半径98）
+  または named引数 .cylinder(height=40, radius=98) を使うことを推奨
 - 確定済みステップがある場合、cq_code は result 変数を引き継ぐ
 
 【パラメータ形式】

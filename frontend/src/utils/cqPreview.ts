@@ -43,12 +43,22 @@ function parseBox(code: string) {
 }
 
 function parseCylinder(code: string) {
-  // .cylinder(radius=r, height=h) | .cylinder(r, h) | .circle(r).extrude(h)
-  let m = code.match(
-    /\.cylinder\(\s*(?:radius\s*=\s*)?([\d.]+)\s*,\s*(?:height\s*=\s*)?([\d.]+)/,
-  );
-  if (m) return { r: f(m, 1), h: f(m, 2) };
-  m = code.match(/\.circle\(\s*([\d.]+)\s*\)[\s\S]*?\.extrude\(\s*([\d.]+)\s*\)/);
+  // Extract the full .cylinder(...) argument string first
+  const callMatch = code.match(/\.cylinder\(([^)]+)\)/);
+  if (callMatch) {
+    const args = callMatch[1]!;
+    // Named keyword arguments (any order): radius=R, height=H
+    const rKw = args.match(/radius\s*=\s*([\d.]+)/);
+    const hKw = args.match(/height\s*=\s*([\d.]+)/);
+    if (rKw && hKw) return { r: parseFloat(rKw[1]!), h: parseFloat(hKw[1]!) };
+    // CadQuery positional signature: .cylinder(height, radius, ...)
+    // height is the FIRST positional arg, radius is the SECOND.
+    const posNums = [...args.matchAll(/([\d.]+(?:\.\d+)?)/g)].map((m) => parseFloat(m[1]!));
+    if (posNums.length >= 2) return { r: posNums[1]!, h: posNums[0]! };
+    if (posNums.length === 1) return { r: posNums[0]!, h: posNums[0]! };
+  }
+  // Fallback: .circle(r).extrude(h) — radius then height (correct order)
+  const m = code.match(/\.circle\(\s*([\d.]+)\s*\)[\s\S]*?\.extrude\(\s*([\d.]+)\s*\)/);
   if (m) return { r: f(m, 1), h: f(m, 2) };
   return null;
 }
