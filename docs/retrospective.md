@@ -620,3 +620,54 @@ Response 202: { "status": "modifying", "plan_id": "..." }
 - AI が内部推論で既存値を変更しても、ユーザーが明示的に指定した値（`explicit_params`）は必ず AI 結果を上書きする。UI 側も「送信後の最新 DynamoDB 値でリセット」を徹底する
 - 複数ステップを一括修正する場合、プロンプトには「修正対象リスト」として全対象を列挙し、AI が相互依存を考慮して修正できるようにする
 - 単一ステップ修正 API（旧 `/steps/{seq}/modify`）は後方互換を保ちつつ新 `/modify` に委譲する形にすることで、フロントエンドの移行を段階的に行える
+
+---
+
+## 2026-07 ブラウザ内累積 CSG プレビュー実装
+
+### 実施内容
+- BuildPlan のステッププレビューを「単一ステップの形状のみ」から「選択ステップまでの全操作を反映した累積 3D プレビュー」に刷新
+- 未実行ステップでも穴・ポケット・スロット等のブール演算をブラウザ内でリアルタイム合成して即時 3D 表示
+
+### 変更ファイル一覧
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `frontend/src/utils/cqPreview.ts` | 新規 — CadQuery コードを正規表現でパースし、`three-bvh-csg` で CSG 合成する累積プレビューユーティリティ |
+| `frontend/src/components/StepPreview3D.tsx` | `allSteps: BuildStep[]` prop 追加。未実行ステップを `buildCumulativePreview()` で CSG レンダリング。`"note"/"parametric"` モードを廃止し `"csg"` モードに統合 |
+| `frontend/src/components/BuildPlanPanel.tsx` | `<StepPreview3D allSteps={localSteps} />` に更新 |
+
+### 技術的な実装詳細
+
+#### CQ → Three.js 座標変換
+```
+CQ X   → Three X  (同一)
+CQ Y   → Three -Z
+CQ Z   → Three Y  (上方向)
+box(W, D, H) → BoxGeometry(W, H, D)
+```
+
+#### 対応ステップ種別
+| step_type | 処理 |
+|----------|------|
+| `base_body` | box/cylinder を BoxGeometry / CylinderGeometry で生成 |
+| `hole_through` / `hole_blind` / `tapped_hole` | CylinderGeometry を CSG 減算。6面方向（>Z/<Z/>X/<X/>Y/<Y）すべて対応 |
+| `slot` | BoxGeometry を CSG 減算（端部 R は矩形近似＋注釈表示） |
+| `pocket` | BoxGeometry を CSG 減算 |
+| `fillet` / `chamfer` | CSG 省略。注釈テキストを表示 |
+
+#### CSG ライブラリ
+- `three-bvh-csg@^0.0.18`（既存依存）
+- `Evaluator.evaluate(meshA, meshB, SUBTRACTION)` でブール減算
+- `safeSubtract()` で try-catch し、失敗時は前の累積メッシュを維持
+
+### 発生した問題と対処
+
+| 問題 | 原因 | 対処 |
+|------|------|------|
+| TypeScript strict null check エラー 4 件 | `RegExpMatchArray[i]` の型が `string \| undefined` | `m[i] ?? "0"` / `m[1]?.toUpperCase() ?? ">Z"` / `m[1]!.matchAll(...)` + `p[n] ?? "0"` で修正 |
+
+### 改善策・再発防止
+- `three-bvh-csg` の CSG 演算は入力メッシュの `updateMatrixWorld()` を事前に呼ぶ必要がある
+- 正規表現パースでは TypeScript strict モード下で `RegExpMatchArray[n]` が常に `string | undefined` になる。`nullish coalescing` または `!` アサーションで明示的に扱うこと
+- CSG は近似であることをユーザーに注釈で伝える（長穴の端部 R、フィレット省略等）

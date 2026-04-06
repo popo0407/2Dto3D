@@ -1,0 +1,340 @@
+/**
+ * CadQuery → Three.js cumulative CSG preview utility.
+ *
+ * Coordinate mapping:
+ *   CQ X  →  Three X  (same)
+ *   CQ Y  →  Three -Z  (Three Z = -CQ Y)
+ *   CQ Z  →  Three Y   (both "up")
+ *
+ * CQ box(W, D, H)  →  Three BoxGeometry(W, H, D)
+ *   W = length (CQ X / Three X)
+ *   D = depth  (CQ Y / Three -Z)
+ *   H = height (CQ Z / Three Y)
+ *
+ * Workplane pushPoints on each face:
+ *   >Z  U=CQ_X  V=CQ_Y  →  Three (U,  H/2, -V)   drill axis: -Y CQ = Three Y
+ *   <Z  U=CQ_X  V=CQ_Y  →  Three (U, -H/2, -V)
+ *   >X  U=CQ_Y  V=CQ_Z  →  Three (W/2,  V, -U)   drill axis: -X CQ = Three -X
+ *   <X  U=CQ_Y  V=CQ_Z  →  Three (-W/2, V, -U)
+ *   >Y  U=CQ_X  V=CQ_Z  →  Three (U,   V, -D/2)  drill axis: -Y CQ = Three +Z
+ *   <Y  U=CQ_X  V=CQ_Z  →  Three (U,   V,  D/2)  drill axis: +Y CQ = Three -Z
+ */
+
+import * as THREE from "three";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore – three-bvh-csg v0.0.18 lacks full TS declarations
+import { Evaluator, Brush, SUBTRACTION } from "three-bvh-csg";
+import type { BuildStep } from "../components/BuildPlanPanel";
+
+export interface CqPreviewResult {
+  geometry: THREE.BufferGeometry;
+  notes: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Parsers
+// ---------------------------------------------------------------------------
+
+const f = (m: RegExpMatchArray, i: number) => parseFloat(m[i] ?? "0");
+
+function parseBox(code: string) {
+  const m = code.match(/\.box\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/);
+  return m ? { w: f(m, 1), d: f(m, 2), h: f(m, 3) } : null;
+}
+
+function parseCylinder(code: string) {
+  // .cylinder(radius=r, height=h) | .cylinder(r, h) | .circle(r).extrude(h)
+  let m = code.match(
+    /\.cylinder\(\s*(?:radius\s*=\s*)?([\d.]+)\s*,\s*(?:height\s*=\s*)?([\d.]+)/,
+  );
+  if (m) return { r: f(m, 1), h: f(m, 2) };
+  m = code.match(/\.circle\(\s*([\d.]+)\s*\)[\s\S]*?\.extrude\(\s*([\d.]+)\s*\)/);
+  if (m) return { r: f(m, 1), h: f(m, 2) };
+  return null;
+}
+
+function parseFace(code: string): string {
+  const m = code.match(/\.faces\(\s*["']([<>][XYZxyz])["']/);
+  return m ? (m[1] ?? ">Z").toUpperCase() : ">Z";
+}
+
+function parsePushPoints(code: string): { x: number; y: number }[] {
+  const m = code.match(/\.pushPoints\(\s*\[([\s\S]*?)\]/);
+  if (!m) return [{ x: 0, y: 0 }];
+  const pts: { x: number; y: number }[] = [];
+  for (const p of m[1]!.matchAll(/\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)/g)) {
+    pts.push({ x: parseFloat(p[1] ?? "0"), y: parseFloat(p[2] ?? "0") });
+  }
+  return pts.length ? pts : [{ x: 0, y: 0 }];
+}
+
+function parseHole(code: string) {
+  const m = code.match(/\.hole\(\s*([\d.]+)(?:\s*,\s*([\d.]+))?\s*\)/);
+  return m ? { d: f(m, 1), depth: m[2] ? f(m, 2) : null } : null;
+}
+
+function parseRect(code: string) {
+  const m = code.match(/\.rect\(\s*([\d.]+)\s*,\s*([\d.]+)\s*\)/);
+  return m ? { w: f(m, 1), h: f(m, 2) } : null;
+}
+
+function parseCutBlind(code: string) {
+  const m = code.match(/\.cutBlind\(\s*([\d.]+)\s*\)/);
+  return m ? f(m, 1) : null;
+}
+
+function parseSlot2D(code: string) {
+  const m = code.match(/\.slot2D\(\s*([\d.]+)\s*,\s*([\d.]+)\s*\)/);
+  return m ? { len: f(m, 1), w: f(m, 2) } : null;
+}
+
+function parseCenter(code: string) {
+  const m = code.match(/\.center\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)/);
+  return m ? { x: f(m, 1), y: f(m, 2) } : null;
+}
+
+// ---------------------------------------------------------------------------
+// Coordinate helpers
+// ---------------------------------------------------------------------------
+
+interface BodyDims { w: number; d: number; h: number }
+
+/**
+ * Convert workplane pushPoint (u, v) on face `face` to a Three.js
+ * cutter cylinder transform.
+ *
+ * Returns { pos, rot, height } where the CylinderGeometry default axis is Y.
+ */
+function cutterTransform(
+  face: string,
+  pt: { x: number; y: number },
+  dims: BodyDims,
+  cutDepth: number | null, // null = through-all
+): { pos: THREE.Vector3; rot: THREE.Euler; height: number } {
+  const { w: W, d: D, h: H } = dims;
+  const thru = cutDepth === null;
+  const d = cutDepth ?? 0;
+  const EPS = 0.2; // overshoot for clean boolean
+
+  switch (face) {
+    case ">Z":
+      return {
+        pos: new THREE.Vector3(pt.x, thru ? 0 : H / 2 - d / 2, -pt.y),
+        rot: new THREE.Euler(0, 0, 0),
+        height: thru ? H + EPS * 2 : d + EPS,
+      };
+    case "<Z":
+      return {
+        pos: new THREE.Vector3(pt.x, thru ? 0 : -H / 2 + d / 2, -pt.y),
+        rot: new THREE.Euler(0, 0, 0),
+        height: thru ? H + EPS * 2 : d + EPS,
+      };
+    case ">X":
+      // Workplane on +X face: U=CQ_Y, V=CQ_Z
+      // CQ(W/2, u, v) → Three(W/2, v, -u)
+      // Drill axis: -X CQ → -X Three → rot Y→X: PI/2 around Z
+      return {
+        pos: new THREE.Vector3(thru ? 0 : W / 2 - d / 2, pt.y, -pt.x),
+        rot: new THREE.Euler(0, 0, Math.PI / 2),
+        height: thru ? W + EPS * 2 : d + EPS,
+      };
+    case "<X":
+      return {
+        pos: new THREE.Vector3(thru ? 0 : -W / 2 + d / 2, pt.y, -pt.x),
+        rot: new THREE.Euler(0, 0, Math.PI / 2),
+        height: thru ? W + EPS * 2 : d + EPS,
+      };
+    case ">Y":
+      // Workplane on +Y face (CQ) = Three -Z face
+      // U=CQ_X → Three X, V=CQ_Z → Three Y
+      // CQ(u, D/2, v) → Three(u, v, -D/2)
+      // Drill axis: -Y CQ → +Z Three → rot Y→+Z: PI/2 around X
+      return {
+        pos: new THREE.Vector3(pt.x, pt.y, thru ? 0 : -D / 2 + d / 2),
+        rot: new THREE.Euler(Math.PI / 2, 0, 0),
+        height: thru ? D + EPS * 2 : d + EPS,
+      };
+    case "<Y":
+      // Drill axis: +Y CQ → -Z Three → rot Y→-Z: -PI/2 around X
+      return {
+        pos: new THREE.Vector3(pt.x, pt.y, thru ? 0 : D / 2 - d / 2),
+        rot: new THREE.Euler(-Math.PI / 2, 0, 0),
+        height: thru ? D + EPS * 2 : d + EPS,
+      };
+    default:
+      return {
+        pos: new THREE.Vector3(pt.x, thru ? 0 : H / 2 - d / 2, -pt.y),
+        rot: new THREE.Euler(0, 0, 0),
+        height: thru ? H + EPS * 2 : d + EPS,
+      };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CSG helpers
+// ---------------------------------------------------------------------------
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let _evaluator: any = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function getEvaluator(): any {
+  return (_evaluator ??= new Evaluator());
+}
+
+function makeBrush(geo: THREE.BufferGeometry, pos?: THREE.Vector3, rot?: THREE.Euler): typeof Brush {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const b = new Brush(geo) as any;
+  if (pos) b.position.copy(pos);
+  if (rot) b.rotation.copy(rot);
+  b.updateMatrixWorld(true);
+  return b;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function safeCut(baseBrush: any, cutterBrush: any, notes: string[], stepSeq: string): any {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = new Brush() as any;
+    getEvaluator().evaluate(baseBrush, cutterBrush, SUBTRACTION, result);
+    result.geometry.computeVertexNormals();
+    return result;
+  } catch {
+    notes.push(`Step ${stepSeq}: ブール演算に失敗（近似）`);
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Main export
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a cumulative Three.js geometry from step 1 through `upToSeq`
+ * using client-side CSG (three-bvh-csg).
+ */
+export function buildCumulativePreview(
+  allSteps: BuildStep[],
+  upToSeq: string,
+): CqPreviewResult {
+  const notes: string[] = [];
+  const steps = [...allSteps]
+    .filter((s) => s.step_seq <= upToSeq)
+    .sort((a, b) => a.step_seq.localeCompare(b.step_seq));
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let baseBrush: any = null;
+  let dims: BodyDims = { w: 50, d: 30, h: 10 };
+
+  for (const step of steps) {
+    const code = step.cq_code ?? "";
+    try {
+      switch (step.step_type) {
+        // -------- Base body --------
+        case "base_body": {
+          const box = parseBox(code);
+          if (box) {
+            dims = box;
+            const geo = new THREE.BoxGeometry(box.w, box.h, box.d);
+            geo.computeVertexNormals();
+            baseBrush = makeBrush(geo);
+          } else {
+            const cyl = parseCylinder(code);
+            if (cyl) {
+              dims = { w: cyl.r * 2, d: cyl.r * 2, h: cyl.h };
+              const geo = new THREE.CylinderGeometry(cyl.r, cyl.r, cyl.h, 64);
+              geo.computeVertexNormals();
+              baseBrush = makeBrush(geo);
+            }
+          }
+          break;
+        }
+
+        // -------- Holes --------
+        case "hole_through":
+        case "hole_blind":
+        case "tapped_hole": {
+          if (!baseBrush) break;
+          const hole = parseHole(code);
+          if (!hole) {
+            notes.push(`Step ${step.step_seq}: 穴寸法を解析できず`);
+            break;
+          }
+          const face = parseFace(code);
+          const pts = parsePushPoints(code);
+          for (const pt of pts) {
+            const { pos, rot, height } = cutterTransform(face, pt, dims, hole.depth);
+            const cylGeo = new THREE.CylinderGeometry(hole.d / 2, hole.d / 2, height, 32);
+            const cutter = makeBrush(cylGeo, pos, rot);
+            const result = safeCut(baseBrush, cutter, notes, step.step_seq);
+            if (result) baseBrush = result;
+          }
+          break;
+        }
+
+        // -------- Slot --------
+        case "slot": {
+          if (!baseBrush) break;
+          const slot = parseSlot2D(code);
+          if (!slot) { notes.push(`Step ${step.step_seq}: 長穴を解析できず`); break; }
+          const face = parseFace(code);
+          const thru = /cutThruAll/.test(code);
+          const depth = thru ? null : parseCutBlind(code);
+          const centerOff = parseCenter(code) ?? { x: 0, y: 0 };
+          const pts = parsePushPoints(code);
+          const origin = pts[0] ?? { x: 0, y: 0 };
+          const pt = { x: origin.x + centerOff.x, y: origin.y + centerOff.y };
+          const { pos, rot, height } = cutterTransform(face, pt, dims, depth);
+          // Approx: box cutter (rounded ends omitted)
+          const slotGeo = new THREE.BoxGeometry(slot.w, height, slot.len);
+          const cutter = makeBrush(slotGeo, pos, rot);
+          const result = safeCut(baseBrush, cutter, notes, step.step_seq);
+          if (result) {
+            baseBrush = result;
+            notes.push(`Step ${step.step_seq}: 長穴端部（R）は矩形で近似`);
+          }
+          break;
+        }
+
+        // -------- Pocket --------
+        case "pocket": {
+          if (!baseBrush) break;
+          const rect = parseRect(code);
+          const depth = parseCutBlind(code);
+          if (!rect || !depth) { notes.push(`Step ${step.step_seq}: ポケットを解析できず`); break; }
+          const face = parseFace(code);
+          const centerOff = parseCenter(code) ?? { x: 0, y: 0 };
+          const pts = parsePushPoints(code);
+          const origin = pts[0] ?? { x: 0, y: 0 };
+          const pt = { x: origin.x + centerOff.x, y: origin.y + centerOff.y };
+          const { pos, rot, height } = cutterTransform(face, pt, dims, depth);
+          const pocketGeo = new THREE.BoxGeometry(rect.w, height, rect.h);
+          const cutter = makeBrush(pocketGeo, pos, rot);
+          const result = safeCut(baseBrush, cutter, notes, step.step_seq);
+          if (result) baseBrush = result;
+          break;
+        }
+
+        // -------- Edge treatments (cannot simulate) --------
+        case "fillet":
+        case "chamfer":
+          notes.push(`${step.step_name}: エッジ処理はプレビューでは省略`);
+          break;
+
+        default:
+          break;
+      }
+    } catch (e) {
+      notes.push(`Step ${step.step_seq}: エラー`);
+      console.warn("[cqPreview]", step.step_seq, e);
+    }
+  }
+
+  if (!baseBrush) {
+    const fallback = new THREE.BoxGeometry(dims.w, dims.h, dims.d);
+    return { geometry: fallback, notes };
+  }
+
+  // Extract geometry (Brush extends Mesh, geometry is a BufferGeometry)
+  const geo = baseBrush.geometry as THREE.BufferGeometry;
+  return { geometry: geo, notes };
+}

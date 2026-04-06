@@ -671,6 +671,7 @@ export function BuildPlanPanel({
         <div className="relative flex-1 min-w-0 border-r">
           <StepPreview3D
             step={selectedStepData ?? null}
+            allSteps={localSteps}
             planId={plan.plan_id}
             idToken={idToken}
           />
