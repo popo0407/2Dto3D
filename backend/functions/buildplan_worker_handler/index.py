@@ -77,7 +77,7 @@ NEXT_STEP_PROMPT = """添付の2D図面を見て、3Dモデルを段階的に構
   "choices": []
 }}
 ```
-※ confidence < 0.85 の場合のみ choices に解釈の選択肢を入れてください（例: [{{{"id":"a","label":"φ8mm"}},...}}]）
+※ confidence < 0.85 の場合のみ choices に解釈の選択肢を入れてください（例: [{{"id":"a","label":"φ8mm"}},...]）
 ※ JSON のみ出力。cq_code の先頭に import 文は不要
 """
 

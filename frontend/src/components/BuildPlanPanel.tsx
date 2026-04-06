@@ -83,6 +83,44 @@ const STEP_TYPE_LABEL: Record<string, string> = {
 // ---------------------------------------------------------------------------
 
 function DrawingViewer({ url }: { url: string | null }) {
+  const [scale, setScale] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const dragging = useRef(false);
+  const lastPoint = useRef({ x: 0, y: 0 });
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // Non-passive wheel listener (needed to call preventDefault)
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      setScale((prev) => Math.min(8, Math.max(0.2, prev * (e.deltaY < 0 ? 1.15 : 1 / 1.15))));
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    dragging.current = true;
+    lastPoint.current = { x: e.clientX, y: e.clientY };
+  };
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if (!dragging.current) return;
+    const dx = e.clientX - lastPoint.current.x;
+    const dy = e.clientY - lastPoint.current.y;
+    lastPoint.current = { x: e.clientX, y: e.clientY };
+    setOffset((prev) => ({ x: prev.x + dx, y: prev.y + dy }));
+  };
+  const handleMouseUp = () => {
+    dragging.current = false;
+  };
+  const handleReset = () => {
+    setScale(1);
+    setOffset({ x: 0, y: 0 });
+  };
+
   if (!url) {
     return (
       <div className="flex h-full items-center justify-center bg-gray-100 text-xs text-gray-400">
@@ -90,9 +128,64 @@ function DrawingViewer({ url }: { url: string | null }) {
       </div>
     );
   }
+
   return (
-    <div className="flex h-full items-center justify-center overflow-auto bg-gray-50 p-2">
-      <img src={url} alt="2D図面" className="max-h-full max-w-full object-contain" />
+    <div
+      ref={containerRef}
+      className="relative h-full w-full select-none overflow-hidden bg-gray-50 cursor-grab active:cursor-grabbing"
+      onMouseDown={handleMouseDown}
+      onMouseMove={handleMouseMove}
+      onMouseUp={handleMouseUp}
+      onMouseLeave={handleMouseUp}
+      onDoubleClick={handleReset}
+    >
+      {/* Transformed image layer */}
+      <div
+        className="pointer-events-none absolute inset-0 flex items-center justify-center p-2"
+        style={{
+          transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
+          transformOrigin: "center",
+        }}
+      >
+        <img
+          src={url}
+          alt="2D図面"
+          draggable={false}
+          className="max-h-full max-w-full object-contain"
+        />
+      </div>
+
+      {/* Zoom controls */}
+      <div
+        className="absolute bottom-2 right-2 z-10 flex items-center gap-0.5 rounded bg-white/90 px-2 py-1 shadow text-[10px] text-gray-600 backdrop-blur-sm"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <button
+          type="button"
+          title="縮小 (スクロールダウン)"
+          onClick={() => setScale((p) => Math.max(0.2, p / 1.2))}
+          className="flex h-5 w-5 items-center justify-center rounded hover:bg-gray-100 font-bold"
+        >
+          −
+        </button>
+        <span className="w-9 text-center font-mono">{Math.round(scale * 100)}%</span>
+        <button
+          type="button"
+          title="拡大 (スクロールアップ)"
+          onClick={() => setScale((p) => Math.min(8, p * 1.2))}
+          className="flex h-5 w-5 items-center justify-center rounded hover:bg-gray-100 font-bold"
+        >
+          +
+        </button>
+        <button
+          type="button"
+          title="リセット (ダブルクリックでも可)"
+          onClick={handleReset}
+          className="ml-1 flex h-5 w-5 items-center justify-center rounded hover:bg-gray-100"
+        >
+          ↺
+        </button>
+      </div>
     </div>
   );
 }
