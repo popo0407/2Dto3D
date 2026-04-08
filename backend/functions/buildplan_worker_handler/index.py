@@ -84,8 +84,9 @@ NEXT_STEP_PROMPT = """添付の2D図面を見て、3Dモデルを段階的に構
 """
 
 REVISE_SYSTEM_PROMPT = """あなたは機械設計の専門家でありCADオペレーターです。
-ユーザーの指摘を受けてステップの修正案を提案してください。
-過去の会話履歴を踏まえた上で、同じJSON形式（is_complete, step_type, step_name, parameters, cq_code, group_id, confidence, explanation, choices）で修正版を返してください。
+ユーザーが直前のあなたの提案に対して指摘・修正を行っています。
+その指摘内容を必ず反映し、前回と同じ内容を繰り返さないでください。
+修正が必要な箇所だけ変更し、同じJSON形式（is_complete, step_type, step_name, parameters, cq_code, group_id, confidence, explanation, choices）で修正版を返してください。
 JSON のみ出力してください。"""
 
 
@@ -279,10 +280,10 @@ def _handle_revise_step(event: dict) -> None:
         else:
             confirmed_summary = "（確定済みステップなし）"
 
-        # Build messages: synthetic first user (image + context), then conversation, then new user
+        # Build messages: synthetic first user (image + original NEXT_STEP_PROMPT), then conversation, then new user
+        import base64
         initial_user_content: list = []
         if image_bytes:
-            import base64
             initial_user_content.append({
                 "type": "image",
                 "source": {
@@ -293,11 +294,7 @@ def _handle_revise_step(event: dict) -> None:
             })
         initial_user_content.append({
             "type": "text",
-            "text": (
-                f"2D図面を見て、3Dモデル構築の次のステップを提案してください。\n\n"
-                f"確定済みステップ:\n{confirmed_summary}\n\n"
-                "同じJSONフォーマットで回答してください。"
-            ),
+            "text": NEXT_STEP_PROMPT.format(confirmed_steps=confirmed_summary),
         })
 
         messages: list[dict] = [{"role": "user", "content": initial_user_content}]
@@ -308,7 +305,11 @@ def _handle_revise_step(event: dict) -> None:
             })
         messages.append({
             "role": "user",
-            "content": f"{user_message}\n\n同じJSON形式で修正版を出力してください。",
+            "content": (
+                f"{user_message}\n\n"
+                "上記の指摘を必ず反映して、修正版をJSON形式のみで出力してください。"
+                "前回と同じ内容は繰り返さないでください。"
+            ),
         })
 
         from common.bedrock_client import get_bedrock_client
