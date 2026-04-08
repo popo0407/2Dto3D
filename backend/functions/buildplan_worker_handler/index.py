@@ -330,15 +330,17 @@ def _handle_revise_step(event: dict) -> None:
         ]
 
         # Update step with revised proposal
+        # NOTE: "parameters" is a DynamoDB reserved keyword → must use ExpressionAttributeNames
         choices = _float_to_decimal(ai_output.get("choices", []))
         steps_table.update_item(
             Key={"plan_id": plan_id, "step_seq": step_seq},
             UpdateExpression=(
                 "SET step_type = :stype, step_name = :sname, "
-                "parameters = :params, cq_code = :code, "
+                "#params = :params, cq_code = :code, "
                 "group_id = :gid, confidence = :conf, "
                 "ai_reasoning = :reason, choices = :ch, conversation = :conv"
             ),
+            ExpressionAttributeNames={"#params": "parameters"},
             ExpressionAttributeValues={
                 ":stype": ai_output.get("step_type", step.get("step_type", "")),
                 ":sname": ai_output.get("step_name", step.get("step_name", "")),
