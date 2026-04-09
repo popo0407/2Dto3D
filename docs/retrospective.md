@@ -746,3 +746,49 @@ Frontend: GET /build-plans/{id} を 3 秒ごとにポーリング
 | ファイル | 変更内容 |
 | --- | --- |
 | `backend/functions/buildplan_worker_handler/index.py` | `REVISE_SYSTEM_PROMPT`強化、合成初回ユーザーメッセージを`NEXT_STEP_PROMPT`に変更、最終ユーザーメッセージを強化 |
+
+---
+
+## 2026-04-09: Docker 不要デプロイ対応（ContainerImage.from_registry 方式）
+
+### 実施内容
+- `cdk/lib/stacks/pipeline_stack.py` の ECS コンテナ参照方式を変更
+- `ContainerImage.from_asset()` → `ContainerImage.from_registry()` に変更
+- `buildspec.yml`（CodeBuild 用）をリポジトリルートに追加
+- `README.md` にデプロイ前提条件を追記
+
+### 問題の原因
+
+| 問題 | 原因 |
+|------|------|
+| Docker なし環境で `cdk deploy` が `Failed to find and execute 'docker'` で失敗 | `ContainerImage.from_asset()` は `cdk deploy` 実行時にローカルで `docker build` を自動実行する。Windows など Docker 未インストール環境では環境の準備が困難 |
+| `runner.py` の修正が ECS コンテナに反映されない | Docker ビルドが走らないためイメージが更新されず、古いコンテナが使われ続ける |
+
+### 対処
+
+| 変更 | ファイル | 内容 |
+|------|----------|------|
+| `from_asset()` → `from_registry()` | `cdk/lib/stacks/pipeline_stack.py` | ECR に push 済みのイメージを参照するだけに変更。URI は `<account>.dkr.ecr.<region>.amazonaws.com/<project>-<env>-cadquery:latest` と動的構築 |
+| `buildspec.yml` 追加（新規） | `buildspec.yml` | AWS CodeBuild でコンテナをビルドして ECR に push するビルドスペック。`ENV_NAME` 変数で dev/prod の ECR リポジトリを切り替え可能 |
+| CDK デプロイ手順更新 | `README.md` | 「ECR への初回ビルド」の前提条件と確認コマンドを追記 |
+
+### アーキテクチャの変化
+
+```
+【変更前】
+cdk deploy 実行
+  ↓ from_asset() が自動的にローカル docker build を実行
+  ❌ Docker 未インストール環境で失敗
+
+【変更後】
+① AWS CodeBuild (buildspec.yml) で docker build → ECR push（手動 or 自動トリガー）
+② cdk deploy 実行
+     ↓ from_registry() は ECR URI を参照するだけ
+  ✅ Docker 不要でどの環境からでも成功
+```
+
+### 改善策・再発防止
+- ECS Fargate コンテナは **`from_registry()` + CodeBuild** の組み合わせを標準とする。`from_asset()` はローカル Docker の強制依存が生まれるため本番デプロイには使わない
+- ECR URI は `self.account`, `self.region`, `env_name`, `project_name` から動的構築することで dev/prod 両環境に対応可能
+- コンテナイメージを変更した場合は CodeBuild を手動実行して ECR にプッシュしてから `cdk deploy` を行う
+- CodeBuild サービスロールには ECR push 権限（`ecr:PutImage` 等）と `ecr:GetAuthorizationToken` を最小権限で付与する
