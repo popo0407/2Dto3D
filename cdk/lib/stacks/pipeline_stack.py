@@ -220,7 +220,10 @@ class PipelineStack(Stack):
             container = task_definition.add_container(
                 "CadQueryContainer",
                 container_name="cadquery-runner",
-                image=ecs.ContainerImage.from_asset("../backend/functions/cadquery_runner"),
+                image=ecs.ContainerImage.from_registry(
+                    f"{self.account}.dkr.ecr.{self.region}.amazonaws.com"
+                    f"/{project_name}-{env_name}-cadquery:latest"
+                ),
                 logging=ecs.LogDrivers.aws_logs(
                     stream_prefix="cadquery", log_group=log_group
                 ),
