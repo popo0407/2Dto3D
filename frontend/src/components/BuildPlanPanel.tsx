@@ -52,6 +52,8 @@ interface PollState {
   current_step_seq: string;
   current_step_status: string;
   reasoning: string;
+  total_input_tokens: number;
+  total_output_tokens: number;
 }
 
 interface Props {
@@ -291,6 +293,8 @@ export function BuildPlanPanel({
             current_step_seq: data.current_step_seq ?? "",
             current_step_status: data.current_step_status ?? "",
             reasoning: data.reasoning ?? "",
+            total_input_tokens: Number(data.total_input_tokens ?? 0),
+            total_output_tokens: Number(data.total_output_tokens ?? 0),
           };
           setPollState(ps);
 
@@ -504,12 +508,15 @@ export function BuildPlanPanel({
   );
 
   const isDone = pollState?.current_step_status === "done";
+  const totalTokens = (pollState?.total_input_tokens ?? 0) + (pollState?.total_output_tokens ?? 0);
   const waitingLabel =
-    pollState?.current_step_status === "revising"
-      ? "修正案を生成中..."
+    isExecuting
+      ? "3D モデルを構築中..."
+      : pollState?.current_step_status === "revising"
+      ? "AI が修正案を生成中..."
       : isCreating || pollState?.plan_status === "creating"
-      ? "図面を分析中..."
-      : "次のステップを生成中...";
+      ? "AI が図面を分析中..."
+      : "AI が次のステップを生成中...";
 
   // ---------------------------------------------------------------------------
   // Early render: creating plan
@@ -557,8 +564,9 @@ export function BuildPlanPanel({
       {isExecuting && (
         <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-gray-950/85 backdrop-blur-sm">
           <div className="h-10 w-10 animate-spin rounded-full border-4 border-green-800 border-t-green-400" />
-          <p className="mt-4 text-sm font-semibold text-white">3D モデル生成中...</p>
+          <p className="mt-4 text-sm font-semibold text-white">3D モデルを構築中...</p>
           <p className="mt-1 font-mono text-xs text-green-400">経過: {execElapsed} 秒</p>
+          <p className="mt-2 text-[10px] text-gray-400">CadQuery でソリッドを生成しています</p>
         </div>
       )}
 
@@ -599,40 +607,58 @@ export function BuildPlanPanel({
       {/* ── Right 40%: Tab panel ── */}
       <div className="flex h-full flex-col" style={{ width: "40%" }}>
         {/* Tab header */}
-        <div className="flex shrink-0 items-center border-b bg-gray-50">
-          <button
-            type="button"
-            onClick={() => setActiveTab("chat")}
-            className={`px-4 py-2 text-xs font-semibold transition-colors ${
-              activeTab === "chat"
-                ? "border-b-2 border-indigo-600 text-indigo-700"
-                : "text-gray-500 hover:text-gray-700"
-            }`}
-          >
-            チャット
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab("step")}
-            className={`px-4 py-2 text-xs font-semibold transition-colors ${
-              activeTab === "step"
-                ? "border-b-2 border-indigo-600 text-indigo-700"
-                : "text-gray-500 hover:text-gray-700"
-            }`}
-          >
-            ステップ情報
-          </button>
-          {/* Execute button (visible when all steps are done) */}
-          {isDone && (
-            <div className="ml-auto flex items-center pr-2">
-              <button
-                type="button"
-                onClick={handleExecute}
-                disabled={isExecuting}
-                className="rounded bg-green-600 px-3 py-1 text-xs font-medium text-white hover:bg-green-700 disabled:opacity-50"
-              >
-                3D 生成
-              </button>
+        <div className="flex shrink-0 flex-col border-b bg-gray-50">
+          <div className="flex items-center">
+            <button
+              type="button"
+              onClick={() => setActiveTab("chat")}
+              className={`px-4 py-2 text-xs font-semibold transition-colors ${
+                activeTab === "chat"
+                  ? "border-b-2 border-indigo-600 text-indigo-700"
+                  : "text-gray-500 hover:text-gray-700"
+              }`}
+            >
+              チャット
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab("step")}
+              className={`px-4 py-2 text-xs font-semibold transition-colors ${
+                activeTab === "step"
+                  ? "border-b-2 border-indigo-600 text-indigo-700"
+                  : "text-gray-500 hover:text-gray-700"
+              }`}
+            >
+              ステップ情報
+            </button>
+            {/* Execute button (visible when all steps are done) */}
+            {isDone && (
+              <div className="ml-auto flex items-center pr-2">
+                <button
+                  type="button"
+                  onClick={handleExecute}
+                  disabled={isExecuting}
+                  className="rounded bg-green-600 px-3 py-1 text-xs font-medium text-white hover:bg-green-700 disabled:opacity-50"
+                >
+                  3D 生成
+                </button>
+              </div>
+            )}
+          </div>
+          {/* Token usage bar */}
+          {totalTokens > 0 && (
+            <div className="flex items-center gap-2 border-t border-gray-200 px-3 py-1">
+              <span className="text-[9px] font-medium text-gray-400">トークン使用量</span>
+              <span className="text-[9px] text-blue-500">
+                入力 {(pollState?.total_input_tokens ?? 0).toLocaleString()}
+              </span>
+              <span className="text-[9px] text-gray-300">/</span>
+              <span className="text-[9px] text-green-500">
+                出力 {(pollState?.total_output_tokens ?? 0).toLocaleString()}
+              </span>
+              <span className="ml-auto text-[9px] font-semibold text-gray-500">
+                合計 {totalTokens.toLocaleString()}
+              </span>
             </div>
           )}
         </div>
@@ -665,8 +691,22 @@ export function BuildPlanPanel({
               {/* Waiting spinner */}
               {isWaiting && (
                 <div className="mb-2 flex items-center gap-2 text-[10px] text-gray-400">
-                  <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-gray-300 border-t-indigo-500" />
-                  {waitingLabel}
+                  <span
+                    className={`inline-block h-3 w-3 animate-spin rounded-full border-2 ${
+                      pollState?.current_step_status === "revising"
+                        ? "border-amber-300 border-t-amber-500"
+                        : "border-gray-300 border-t-indigo-500"
+                    }`}
+                  />
+                  <span
+                    className={
+                      pollState?.current_step_status === "revising"
+                        ? "text-amber-500"
+                        : "text-gray-400"
+                    }
+                  >
+                    {waitingLabel}
+                  </span>
                 </div>
               )}
 

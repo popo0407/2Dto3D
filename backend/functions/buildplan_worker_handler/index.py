@@ -158,13 +158,18 @@ def _handle_next_step(event: dict) -> None:
         ai_output = _parse_ai_response(invoke_result.text)
         now = int(time.time())
 
+        # Accumulate token usage in plan
+        inp_tokens = Decimal(str(invoke_result.input_tokens))
+        out_tokens = Decimal(str(invoke_result.output_tokens))
+
         if ai_output.get("is_complete"):
             # All steps done
             plans_table.update_item(
                 Key={"plan_id": plan_id},
                 UpdateExpression=(
                     "SET plan_status = :s, current_step_seq = :cs, "
-                    "current_step_status = :css, total_steps = :t, updated_at = :now"
+                    "current_step_status = :css, total_steps = :t, updated_at = :now "
+                    "ADD total_input_tokens :inp, total_output_tokens :out"
                 ),
                 ExpressionAttributeValues={
                     ":s": "interactive",
@@ -172,6 +177,8 @@ def _handle_next_step(event: dict) -> None:
                     ":css": "done",
                     ":t": len(confirmed),
                     ":now": now,
+                    ":inp": inp_tokens,
+                    ":out": out_tokens,
                 },
             )
             logger.info("BuildPlan next_step: all complete, plan_id=%s", plan_id)
@@ -201,18 +208,21 @@ def _handle_next_step(event: dict) -> None:
             "ttl": now + 90 * 86400,
         })
 
-        # Update plan
+        # Update plan (accumulate tokens with ADD)
         plans_table.update_item(
             Key={"plan_id": plan_id},
             UpdateExpression=(
                 "SET plan_status = :s, current_step_seq = :cs, "
-                "current_step_status = :css, updated_at = :now"
+                "current_step_status = :css, updated_at = :now "
+                "ADD total_input_tokens :inp, total_output_tokens :out"
             ),
             ExpressionAttributeValues={
                 ":s": "interactive",
                 ":cs": next_seq,
                 ":css": "ready",
                 ":now": now,
+                ":inp": inp_tokens,
+                ":out": out_tokens,
             },
         )
 
@@ -354,11 +364,21 @@ def _handle_revise_step(event: dict) -> None:
             },
         )
 
-        # Update plan status back to ready
+        # Update plan status back to ready (accumulate tokens)
+        inp_tokens = Decimal(str(invoke_result.input_tokens))
+        out_tokens = Decimal(str(invoke_result.output_tokens))
         plans_table.update_item(
             Key={"plan_id": plan_id},
-            UpdateExpression="SET current_step_status = :css, updated_at = :now",
-            ExpressionAttributeValues={":css": "ready", ":now": now},
+            UpdateExpression=(
+                "SET current_step_status = :css, updated_at = :now "
+                "ADD total_input_tokens :inp, total_output_tokens :out"
+            ),
+            ExpressionAttributeValues={
+                ":css": "ready",
+                ":now": now,
+                ":inp": inp_tokens,
+                ":out": out_tokens,
+            },
         )
 
         logger.info("revise_step complete: plan_id=%s, seq=%s", plan_id, step_seq)
