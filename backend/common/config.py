@@ -13,6 +13,8 @@ class AppConfig:
     uploads_bucket: str
     artifacts_bucket: str
     previews_bucket: str
+    build_plans_table: str
+    build_steps_table: str
 
 
 def get_config() -> AppConfig:
@@ -26,4 +28,6 @@ def get_config() -> AppConfig:
         uploads_bucket=os.environ.get("UPLOADS_BUCKET", ""),
         artifacts_bucket=os.environ.get("ARTIFACTS_BUCKET", ""),
         previews_bucket=os.environ.get("PREVIEWS_BUCKET", ""),
+        build_plans_table=os.environ.get("BUILD_PLANS_TABLE", "2dto3d-dev-build-plans"),
+        build_steps_table=os.environ.get("BUILD_STEPS_TABLE", "2dto3d-dev-build-steps"),
     )

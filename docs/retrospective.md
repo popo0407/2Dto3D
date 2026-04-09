@@ -151,6 +151,28 @@
 
 ---
 
+## 2026-04-01 CadQueryStep ExitCode 1 バグ修正
+
+### 発生した問題
+Step Functions の `CadQueryStep` で ECS Fargate タスクが ExitCode 1 で終了。
+
+### 根本原因
+
+| 問題 | 原因 |
+|------|------|
+| `NameError: name 'Exception' is not defined` | `runner.py` の `execute_cadquery` が `exec()` に渡す制限 namespace に `Exception` など例外クラスが含まれていなかった。AIが生成した CadQuery スクリプトが `try-except Exception:` で OCC エラーをキャッチしようとして `NameError` で落ちた |
+| `StdFail_NotDone: BRep_API: command not done` | chamfer 操作で OpenCASCADE が形状処理を完了できなかった（スクリプト側のエラー）。上記 `NameError` によって except ブロックが動作しなかったため、エラーがそのまま上位に伝搬した |
+
+### 対処
+`runner.py` の `execute_cadquery` namespace `__builtins__` に以下の例外クラスを追加：
+`Exception`, `BaseException`, `ValueError`, `TypeError`, `RuntimeError`, `IndexError`, `KeyError`, `AttributeError`, `NotImplementedError`, `StopIteration`, `OverflowError`
+
+### 再発防止
+- `exec()` に渡す制限 namespace を構築する際は、スクリプトが使用する可能性のある組み込みを網羅する。特に `try-except` ブロックに必要な例外クラスを忘れずに含める
+- 新しい組み込みが必要になった場合は namespace を拡張し、セキュリティ上問題ないか確認する（`os`, `subprocess` 等の危険モジュールは引き続き除外）
+
+---
+
 ## 2026-03 DynamoDB float 型エラー修正
 
 ### 実施内容
@@ -395,3 +417,332 @@ nodes_table.update_item(
 - 非同期処理の「間」（検証完了→最終生成）にはフロントエンドで状態遷移を明示する。サイレントな待機状態を作らない
 - ユーザーアクションに対するフィードバックは即座に表示する（送信履歴・選択ハイライトなど）
 - 単一メッシュのGLBで面レベル選択を行うには、BufferGeometryのfaceIndexから共面三角形を検出し、オーバーレイメッシュでハイライトするアプローチが有効
+
+---
+
+## 2026-04 Bedrock Lambda タイムアウト修正
+
+### 実施日: 2026-04-01
+
+### 概要
+`2dto3d-dev-ai_analyze_handler` Lambda が Duration: 300000ms（5分）でタイムアウトする問題を修正。
+
+### 根本原因
+| 原因 | 詳細 |
+|------|------|
+| `invoke_model` の同期ブロッキング | boto3 の `invoke_model` は Bedrock がレスポンス全体を生成し終わるまで TCP コネクションを保持したまま待機する。8192 max_tokens + 大容量画像の組み合わせでは Claude の生成完了が 5 分超になる場合がある |
+| Lambda タイムアウトが 300 秒（5 分）に設定されていた | Bedrock 推論時間が Lambda 上限に達してそのまま強制終了 |
+
+### 対処
+
+| 対処 | ファイル |
+|------|----------|
+| `invoke_model` → `invoke_model_with_response_stream` に変更。chunk イベントを順次受信するためコネクションがアクティブに維持され、Lambda がアイドル待機にならない | `backend/common/bedrock_client.py` |
+| Bedrock 呼び出し Lambda のタイムアウトを 300 秒 → **900 秒（Lambda 上限）** に引き上げ | `cdk/lib/stacks/pipeline_stack.py` |
+| 変更対象は Bedrock を呼ぶ全3関数: `ai_analyze_handler`・`dimension_extract_handler`・`dimension_verify_handler` | 同上 |
+
+### 改善策・再発防止
+- Bedrock の `invoke_model`（同期）は応答全体の生成を待つため、**長いプロンプト・多 max_tokens では Lambda タイムアウトの直接原因になる**。`invoke_model_with_response_stream` を標準として使用する
+- streaming API のレスポンス組み立て: Claude の Messages API では `content_block_delta` / `text_delta` イベントのみテキストを含む。他のイベントタイプ（`message_start`, `message_stop` 等）は無視してよい
+- Lambda から Bedrock を呼ぶ場合、タイムアウトは **900 秒（Lambda 最大値）** を設定する
+- 中長期的には Step Functions native `BedrockInvokeModel` タスクへの移行が理想（Lambda 不要・タイムアウト制約な
+
+---
+
+## 2026-04 UI改修（中間プレビュー・トークン表示・スクロール・チャット統合）
+
+### 実施日: 2026-04-02
+
+### 実施内容
+4件のUX課題を修正・実装。
+
+### 発生した問題と対処
+
+| 問題 | 原因 | 対処 |
+|------|------|------|
+| チャット再実行後に中間プレビューが表示されない | `handleChatNodeCreated` が `gltfUrl` をクリアせず、古いモデルURLが残り `Viewer3D` が優先表示された | `handleChatNodeCreated` 冒頭で `setGltfUrl("")`・`setVerifyElements([])`・`setVerifyIterations([])` を追加 |
+| 累計トークン使用量がフロントエンドで確認できない | `BedrockClient` がトークン数を取得・送信していなかった | `invoke_multimodal` の戻り値を `InvokeResult(text, input_tokens, output_tokens)` に変更。各Lambdaで `send_token_usage` を呼び出してWS通知。フロントでは `TOKEN_USAGE` メッセージを受信して累計表示 |
+| 検証タブのコンテンツがスクロールできない | `VerificationPanel` の外側 `div` に `min-h-0` が不足しており flex コンテナが高さを超えてもスクロールが有効にならなかった | `flex flex-1 flex-col` → `flex min-h-0 flex-1 flex-col overflow-hidden` に修正 |
+| 検証中用・検証後修正用チャットが別タブで不便 | 右サイドパネルがタブ切替式のため毎回手動切替が必要だった | タブを廃止。`ChatPanel` に `verifyMode` / `onVerifyComment` / `isBuildingFinal` プロパティを追加し、検証中はWS経由コメント送信・完了後はAPI経由モデル修正をシームレス切替。`VerificationPanel` から独立したコメント入力を削除 |
+
+### 変更ファイル
+| ファイル | 変更内容 |
+|---------|---------|
+| `backend/common/bedrock_client.py` | `InvokeResult` dataclass 追加、ストリームからトークン数を抽出 |
+| `backend/common/ws_notify.py` | `send_token_usage()` 関数追加 |
+| `backend/functions/ai_analyze_handler/index.py` | `send_token_usage` 呼び出し追加 |
+| `backend/functions/dimension_extract_handler/index.py` | 同上 |
+| `backend/functions/dimension_verify_handler/index.py` | `_verify_elements`・`_final_assembly` のreturnにトークン数を追加 |
+| `backend/functions/chat_handler/index.py` | レスポンスに `input_tokens`・`output_tokens` を含める |
+| `cdk/lib/stacks/lambda_stack.py` | `bedrock:InvokeModelWithResponseStream` 権限追加 |
+| `cdk/lib/stacks/pipeline_stack.py` | 同上 |
+| `frontend/src/App.tsx` | タブ廃止・token state追加・ヘッダー表示・統合レイアウト |
+| `frontend/src/components/ChatPanel.tsx` | verifyMode対応・トークン通知callback追加 |
+| `frontend/src/components/VerificationPanel.tsx` | コメント入力削除・スクロール修正 |
+
+### 改善策・再発防止
+- `flex-1` だけでは flex 子要素の高さは親を超えてスクロールを効かせられない。`min-h-0` を組み合わせることで flex コンテナの高さ制約が正しく伝播する
+- 状態遷移時にリセットすべき状態を設計段階で洗い出す（今回は `gltfUrl`・`verifyElements`・`verifyIterations` のリセット漏れ）
+
+---
+
+## 2026-07 段階的構築モード（BuildPlan）実装
+
+### 実施内容
+- 既存の自動パイプラインと**別モード**として「段階的構築（BuildPlan）」機能を新規実装
+- AI が2D図面からステップバイステップの構築計画を生成し、各ステップのパラメータ編集・NLチャット修正・バッチ操作に対応
+- バックエンド: 2 Lambda ハンドラー（buildplan_create_handler, buildplan_step_handler）
+- インフラ: 2 DynamoDB テーブル（build_plans, build_steps）、6 REST API ルート
+- フロントエンド: BuildPlanPanel コンポーネント + App.tsx モード切替
+- テスト: 7テスト追加（全49テスト通過）
+
+### 変更ファイル一覧
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `backend/common/models.py` | `BuildPlanItem`, `BuildStepItem`, `StepParameter` Pydantic モデル追加 |
+| `backend/common/config.py` | `build_plans_table`, `build_steps_table` 環境変数フィールド追加 |
+| `backend/functions/buildplan_create_handler/index.py` | 新規 — AI BuildPlan 生成ハンドラー |
+| `backend/functions/buildplan_step_handler/index.py` | 新規 — ステップ CRUD / 修正 / 実行 / プレビューハンドラー |
+| `backend/tests/conftest.py` | `BUILD_PLANS_TABLE`, `BUILD_STEPS_TABLE` テーブル追加 |
+| `backend/tests/test_buildplan_step_handler.py` | 新規 — 7テスト（list/get/execute/preview/invalid route） |
+| `cdk/lib/stacks/database_stack.py` | `build_plans`, `build_steps` DynamoDB テーブル定義追加 |
+| `cdk/lib/stacks/lambda_stack.py` | 2 Lambda 関数 + 6 API ルート + WebSocket 権限追加 |
+| `cdk/app.py` | BuildPlan テーブルを LambdaStack に渡すよう更新 |
+| `frontend/src/components/BuildPlanPanel.tsx` | 新規 — ステップリスト / パラメータ / NL修正 / 実行UI |
+| `frontend/src/App.tsx` | BuildPlan モード切替 + state 管理統合 |
+| `README.md` | BuildPlan 機能説明・アーキテクチャ図・構成更新 |
+
+### 設計判断
+
+| 判断 | 理由 |
+|------|------|
+| Step Functions ではなく REST API Lambda を採用 | 各ステップをインタラクティブに修正・再実行する必要があり、Step Functions のリニアなフローでは対応困難 |
+| 既存パイプラインと完全に分離 | 要件として「別モード」が指定されており、既存機能への影響をゼロにするため |
+| Dev 環境ではプレースホルダー GLTF を返却 | 既存の mock_cadquery パターンに合わせ、ECS Fargate なしで動作可能 |
+| ステップ修正時に対象以降の全ステップをAI再計画 | CadQuery コードの依存関係（result 変数の引き継ぎ）があるため、部分修正では整合性が保てない |
+
+### 改善策・再発防止
+- 新テーブル追加時は `conftest.py` のフィクスチャにも同時に追加する
+- WebSocket API ID・execute-api 権限は Lambda 作成より後に付与する（CDK コンストラクタの実行順序に注意）
+- `ProcessingMode` のような未使用の型を残さないよう、TypeScript `--noEmit` チェックを習慣付ける
+- ストリーミング API のメタデータ（トークン数）は `message_start` イベント (`input_tokens`) と `message_delta` イベント (`output_tokens`) から取得できるし・コスト削減）
+---
+
+## 2026-04 BuildPlan 504 Gateway Timeout 修正（非同期アーキテクチャ導入）
+
+### 発生した問題
+`POST /sessions/{id}/build-plans` で **504 Gateway Timeout** が頻発。
+Bedrock のマルチモーダル呼び出し（`jp.anthropic.claude-sonnet-4-6`, `max_tokens=16384`）が 1〜2 分かかるのに対し、API Gateway の応答タイムアウトが 29 秒で固定されているため。
+
+### 根本原因
+
+| 問題 | 原因 |
+|------|------|
+| `buildplan_create_handler` が Bedrock を同期呼び出し | Lambda 単体は 900 秒まで実行可能だが、API GW は 29 秒でコネクションを切断する |
+| modify も同様の問題 | `buildplan_step_handler` の自然言語修正も Bedrock を同期呼び出ししていた |
+
+### 対処（非同期 Lambda パターン）
+
+| 変更 | ファイル | 内容 |
+|------|----------|------|
+| kick-off ハンドラーに縮小 | `buildplan_create_handler/index.py` | DynamoDB にプランレコード（status=creating）を作り、worker を `InvocationType="Event"` で非同期起動して 202 を即時返す |
+| 新規 worker ハンドラー | `buildplan_worker_handler/index.py` | `action=create` / `action=modify` の 2 アクションを処理。Bedrock 呼び出し・ステップ保存・status 更新はすべてここで実行 |
+| GET plan + async modify | `buildplan_step_handler/index.py` | `GET /build-plans/{plan_id}` ルート追加（ポーリング用）。modify も worker 非同期起動に変更（202 返却） |
+| CDK: worker fn + 権限 | `lambda_stack.py` | `buildplan_worker_fn` 追加（900 s / 1024 MB / Bedrock 権限）。create/step fn に `lambda:InvokeFunction` 権限を付与、`BUILDPLAN_WORKER_FUNCTION_NAME` env var を追加。`GET /build-plans/{plan_id}` API ルートも追加 |
+| フロントエンド: ポーリング | `BuildPlanPanel.tsx` | create・modify の 202 応答後、`GET /build-plans/{plan_id}` を 3 秒ごとにポーリング。`plan_status=planned` になったらステップを取得して画面更新。アンマウント時に `clearTimeout` でクリーンアップ |
+
+### アーキテクチャフロー
+```
+POST /build-plans  →  create_handler (202 即時返却)
+                           ↓ InvocationType="Event"
+                    worker_handler (最大 900 秒で AI 処理)
+                           ↓ DynamoDB plan_status=planned
+Frontend polling (3s) ← GET /build-plans/{plan_id}
+     → status=planned → GET /build-plans/{plan_id}/steps
+```
+
+### 改善策・再発防止
+- API Gateway のタイムアウト（29 秒）を超える可能性がある処理は **kick-off → worker 非同期** パターンを採用する
+- worker は `InvocationType="Event"` で呼び出す。呼び出し側は返り値を使わない
+- フロントエンドでのポーリングは `useRef` + `setTimeout` で実装し、コンポーネントアンマウント時に必ず `clearTimeout` する（`setInterval` は不使用）
+- worker が失敗した場合は `plan_status=failed` + `reasoning` にエラーメッセージを格納し、フロントエンドがエラー表示できるようにする。worker の呼び出し元には例外を伝播しない（`Event` 呼び出しは返値なし）
+- CDK で `lambda.grant_invoke(caller_fn)` を使うと必要最小限の IAM ポリシーを自動生成できる。手動で `lambda:InvokeFunction` を記述する必要はない
+
+---
+
+## 2026-04 BuildPlan 複数ステップ一括修正機能実装
+
+### 実施内容
+- パラメータ修正・自然言語修正の両方に対応した**複数ステップ一括修正**を実装
+- 単一ステップ修正でパラメータ値が元に戻るバグを修正
+
+### 発生した問題と対処
+
+| 問題 | 原因 | 対処 |
+|------|------|------|
+| 修正後にパラメータ値が元に戻る | worker の AI 応答に古い値が含まれ、フロントエンドがポーリング後に AI 値で上書きしていた | worker で `explicit_params` を AI 応答の parameters にオーバーライドしてから DynamoDB に保存。フロントエンドは取得した最新値で `editingParams` を再初期化 |
+| 結合ルート `/modify` が CDK に登録されていなかった | step_handler コード更新後も CDK 側のリソース定義に新ルートが未追加 | `bp_plan_modify_resource = bp_plan_resource.add_resource("modify")` を追加し CDK 再デプロイ |
+
+### 実装内容
+
+| 変更 | ファイル | 内容 |
+|------|----------|------|
+| MODIFY_PROMPT 更新 | `buildplan_worker_handler/index.py` | `{target_steps_text}` プレースホルダーで複数ステップの修正意図をリスト形式でプロンプトに渡せるよう変更 |
+| `_handle_modify` 更新 | `buildplan_worker_handler/index.py` | `modifications` リスト（`step_seq`, `parameters?`の配列）を受け付け、各エントリの explicit_params を AI 結果に上書きしてから保存 |
+| `_batch_modify` 追加 | `buildplan_step_handler/index.py` | `POST /build-plans/{plan_id}/modify` ルート実装。`modifications` 配列 + `instruction` を受け取り worker を非同期起動して 202 返却 |
+| `_modify_step` 簡素化 | `buildplan_step_handler/index.py` | 単一ステップ修正を `_batch_modify` に委譲（重複コード削除） |
+| CDK ルート追加 | `lambda_stack.py` | `POST /build-plans/{plan_id}/modify` → `buildplan_step_fn` |
+| チェックボックス UI | `BuildPlanPanel.tsx` | ステップリストに checkbox を追加。複数チェック時に右パネルが一括修正パネルに切り替わる |
+| `toggleCheck` / `handleBatchModify` | `BuildPlanPanel.tsx` | チェック状態管理 + 一括修正送信・ポーリングロジック |
+
+### API 仕様（新規）
+```
+POST /build-plans/{plan_id}/modify
+Body: {
+  "modifications": [
+    { "step_seq": "0002", "parameters": { "diameter": { "value": 10, "unit": "mm", "source": "user", "confidence": 1.0 } } },
+    { "step_seq": "0003" }
+  ],
+  "instruction": "（任意）自然言語での追加指示"
+}
+Response 202: { "status": "modifying", "plan_id": "..." }
+→ GET /build-plans/{plan_id} でポーリング → plan_status=planned に変化したら完了
+```
+
+### UX フロー
+1. ステップ一覧の各行左端のチェックボックスをオンにする（複数可・パラメータ/NL 混在可）
+2. 右パネルが一括修正パネルに切り替わり、チェックした各ステップのパラメータエディタが `<details>` で展開
+3. パラメータを変更 and/or 下部の「自然言語での追加指示」テキストエリアに指示を入力
+4. 「N ステップを一括修正」ボタンをクリック → AI修正中スピナー → 完了後に一覧が自動更新
+
+### 改善策・再発防止
+- AI が内部推論で既存値を変更しても、ユーザーが明示的に指定した値（`explicit_params`）は必ず AI 結果を上書きする。UI 側も「送信後の最新 DynamoDB 値でリセット」を徹底する
+- 複数ステップを一括修正する場合、プロンプトには「修正対象リスト」として全対象を列挙し、AI が相互依存を考慮して修正できるようにする
+- 単一ステップ修正 API（旧 `/steps/{seq}/modify`）は後方互換を保ちつつ新 `/modify` に委譲する形にすることで、フロントエンドの移行を段階的に行える
+
+---
+
+## 2026-07 ブラウザ内累積 CSG プレビュー実装
+
+### 実施内容
+- BuildPlan のステッププレビューを「単一ステップの形状のみ」から「選択ステップまでの全操作を反映した累積 3D プレビュー」に刷新
+- 未実行ステップでも穴・ポケット・スロット等のブール演算をブラウザ内でリアルタイム合成して即時 3D 表示
+
+### 変更ファイル一覧
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `frontend/src/utils/cqPreview.ts` | 新規 — CadQuery コードを正規表現でパースし、`three-bvh-csg` で CSG 合成する累積プレビューユーティリティ |
+| `frontend/src/components/StepPreview3D.tsx` | `allSteps: BuildStep[]` prop 追加。未実行ステップを `buildCumulativePreview()` で CSG レンダリング。`"note"/"parametric"` モードを廃止し `"csg"` モードに統合 |
+| `frontend/src/components/BuildPlanPanel.tsx` | `<StepPreview3D allSteps={localSteps} />` に更新 |
+
+### 技術的な実装詳細
+
+#### CQ → Three.js 座標変換
+```
+CQ X   → Three X  (同一)
+CQ Y   → Three -Z
+CQ Z   → Three Y  (上方向)
+box(W, D, H) → BoxGeometry(W, H, D)
+```
+
+#### 対応ステップ種別
+| step_type | 処理 |
+|----------|------|
+| `base_body` | box/cylinder を BoxGeometry / CylinderGeometry で生成 |
+| `hole_through` / `hole_blind` / `tapped_hole` | CylinderGeometry を CSG 減算。6面方向（>Z/<Z/>X/<X/>Y/<Y）すべて対応 |
+| `slot` | BoxGeometry を CSG 減算（端部 R は矩形近似＋注釈表示） |
+| `pocket` | BoxGeometry を CSG 減算 |
+| `fillet` / `chamfer` | CSG 省略。注釈テキストを表示 |
+
+#### CSG ライブラリ
+- `three-bvh-csg@^0.0.18`（既存依存）
+- `Evaluator.evaluate(meshA, meshB, SUBTRACTION)` でブール減算
+- `safeSubtract()` で try-catch し、失敗時は前の累積メッシュを維持
+
+### 発生した問題と対処
+
+| 問題 | 原因 | 対処 |
+|------|------|------|
+| TypeScript strict null check エラー 4 件 | `RegExpMatchArray[i]` の型が `string \| undefined` | `m[i] ?? "0"` / `m[1]?.toUpperCase() ?? ">Z"` / `m[1]!.matchAll(...)` + `p[n] ?? "0"` で修正 |
+
+### 改善策・再発防止
+- `three-bvh-csg` の CSG 演算は入力メッシュの `updateMatrixWorld()` を事前に呼ぶ必要がある
+- 正規表現パースでは TypeScript strict モード下で `RegExpMatchArray[n]` が常に `string | undefined` になる。`nullish coalescing` または `!` アサーションで明示的に扱うこと
+- CSG は近似であることをユーザーに注釈で伝える（長穴の端部 R、フィレット省略等）
+
+---
+
+## 2026-07 BuildPlan インタラクティブ 1 ステップ対話モードへ全面刷新
+
+### 実施内容
+- 「全ステップを一括生成して後から修正」だった BuildPlan モードを「AI が1ステップずつ提案・ユーザーが対話しながら確定」するインタラクティブモードに全面置き換え
+- バックエンド 6 ファイルとフロントエンド 1 ファイルを変更
+
+### 変更ファイル一覧
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `backend/common/bedrock_client.py` | `invoke_with_messages()` メソッド追加（多ターン会話用） |
+| `backend/functions/upload_handler/index.py` | `GET /sessions/{id}/drawing` エンドポイント追加（元図面の署名付き URL 取得） |
+| `backend/functions/buildplan_create_handler/index.py` | 初期レコードに `current_step_seq`, `current_step_status="generating"` を追加。worker kickoff を `action="next_step"` に変更 |
+| `backend/functions/buildplan_worker_handler/index.py` | プロンプトを `INTERACTIVE_SYSTEM_PROMPT` + `NEXT_STEP_PROMPT` + `REVISE_SYSTEM_PROMPT` に置換。 `_handle_next_step()` / `_handle_revise_step()` を実装 |
+| `backend/functions/buildplan_step_handler/index.py` | `_confirm_step()` / `_revise_step()` 追加。`/confirm`, `/revise` ルートを追加 |
+| `cdk/lib/stacks/lambda_stack.py` | `confirm`, `revise`, `drawing` API ルートを追加 |
+| `frontend/src/components/BuildPlanPanel.tsx` | 60/40 分割レイアウト・チャット UI・ポーリングロジックを完全書き換え |
+
+### 新しいワークフロー
+
+```
+POST /build-plans  →  create_handler (202) → worker(next_step)
+worker: 確定済みステップ要約 + 図面画像 → Bedrock → 1 ステップ提案
+        → current_step_status="ready" / plan_status="interactive"
+Frontend: GET /build-plans/{id} を 3 秒ごとにポーリング
+  current_step_status=="ready" → GET /steps/{seq} → チャットに AI メッセージ表示
+  ユーザーが OK → POST /steps/{seq}/confirm → worker(next_step) → ループ
+  ユーザーが修正指示 → POST /steps/{seq}/revise → worker(revise_step) → ポーリング
+  current_step_status=="done" → 「3D 生成」ボタン表示
+```
+
+### 設計判断
+
+| 判断 | 理由 |
+|------|------|
+| `conversation` 配列を DynamoDB ステップに持つ | Bedrock Agent 不要。多ターン会話履歴をステップ単位で管理し、revise 時に `invoke_with_messages()` へ渡す |
+| `choices[]` を AI レスポンスに含める | AI の確信度が低い（confidence < 0.85）場合に選択肢を提示。UI で ChoiceButton として表示し、クリックで revise を自動送信 |
+| 60/40 分割レイアウト | 元図面（2D）と 3D プレビューを常時表示することで、ユーザーが AI の提案を検証しやすくする |
+| 旧バッチモードを完全廃止 | 並立維持によるコード複雑化を避けるため、コードとAPIルートの両方で旧モードを削除 |
+
+### 発生した問題と対処
+
+| 問題 | 原因 | 対処 |
+|------|------|------|
+| ポーリング中に同一 `current_step_seq` で step を二重取得する懸念 | `current_step_status=="ready"` 状態は confirm/revise するまで維持される | フロントエンド側 `prevStepSeqRef` で前回取得済み seq を記録し、一致する場合はスキップ。revise 時に `prevStepSeqRef.current = ""` でリセット |
+
+### 改善策・再発防止
+- 1 ステップ対話型は図面認識精度が低い場合でも人間が各ステップを確認して修正できるため、完全自動生成より最終品質が安定する
+- `invoke_with_messages()` で会話履歴を渡す場合、最初のユーザーメッセージに画像を含める（合成的なファーストメッセージ）ことで全ターンで AI が図面を参照できる
+- ポーリングの二重実行を防ぐため、`startPolling()` の冒頭で `clearTimeout(pollingTimerRef.current)` を呼ぶ
+
+---
+
+## 2026-04-08: 段階的構築モード — 修正指示が反映されないバグ修正
+
+### 問題の原因
+`_handle_revise_step`（buildplan_worker_handler）でBedrockに渡す会話メッセージの「合成初回ユーザーメッセージ」が、本来使われた`NEXT_STEP_PROMPT`（詳細なJSONスキーマ・座標系説明含む）とは全く異なる簡略テキストになっていた。AIはコンテキストのズレを検出し、前回の提案を変更せずにそのまま返していた。また`REVISE_SYSTEM_PROMPT`に「前回と同じ内容を繰り返すな」という明示がなかった。
+
+### 改善策
+1. 合成初回ユーザーメッセージを`NEXT_STEP_PROMPT.format(confirmed_steps=...)`に変更（元の会話を正確に再現）
+2. `REVISE_SYSTEM_PROMPT`を強化：「前回と同じ内容を繰り返さないでください」「指摘内容を必ず反映」を明記
+3. 最後のユーザーメッセージも「上記の指摘を必ず反映して、修正版をJSON形式のみで出力してください。前回と同じ内容は繰り返さないでください。」に改定
+
+### 再発防止策
+- 会話型AIフローでは合成メッセージは元のプロンプトと一致させる
+- revise系プロンプトには「前回の繰り返し禁止」を必ず含める
+- ユーザーからの指摘無視の場合はシステムプロンプト・合成履歴の整合性を疑う
+
+### 変更ファイル
+| ファイル | 変更内容 |
+| --- | --- |
+| `backend/functions/buildplan_worker_handler/index.py` | `REVISE_SYSTEM_PROMPT`強化、合成初回ユーザーメッセージを`NEXT_STEP_PROMPT`に変更、最終ユーザーメッセージを強化 |

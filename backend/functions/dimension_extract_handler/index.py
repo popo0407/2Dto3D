@@ -12,7 +12,7 @@ import time
 from decimal import Decimal
 
 import boto3
-from common.ws_notify import send_progress
+from common.ws_notify import send_progress, send_token_usage
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -39,14 +39,14 @@ EXTRACT_PROMPT = """添付の2D図面画像と、AIが生成した以下のCadQu
 ```json
 [
   {{
-    "element_type": "box" | "hole" | "fillet" | "chamfer" | "slot" | "pocket" | "boss" | "rib" | "other",
+    "element_type": "box" | "hole_through" | "hole_blind" | "tapped_hole" | "fillet" | "chamfer" | "slot" | "pocket" | "boss" | "rib" | "other",
     "feature_label": "Feature-001: base_body" のようなラベル,
+    "feature_spec": {{
+      /* element_type に応じた詳細パラメータ（下記スキーマ参照） */
+    }},
     "dimensions": {{
-      "width": 100.0,
-      "height": 60.0,
-      "depth": 20.0,
-      "diameter": null,
-      "radius": null
+      "width": 100.0, "height": 60.0, "depth": 20.0,
+      "diameter": null, "radius": null
     }},
     "position": {{"x": 0.0, "y": 0.0, "z": 0.0}},
     "orientation": "+Z" | "-Z" | "+Y" | "-Y" | "+X" | "-X" | "XY" | "",
@@ -56,6 +56,46 @@ EXTRACT_PROMPT = """添付の2D図面画像と、AIが生成した以下のCadQu
   }}
 ]
 ```
+
+【feature_spec スキーマ（element_type ごと）】
+
+■ hole_through（貫通穴）
+  {{"hole_type": "through", "diameter": 6.0}}
+
+■ hole_blind（止め穴）
+  {{"hole_type": "blind", "diameter": 6.0, "depth": 10.0}}
+
+■ tapped_hole（ネジ穴・タップ穴）
+  {{
+    "hole_type": "tapped",
+    "designation": "M6",        // JIS/ISO ネジ呼び径 (例: M6, M8x1.25)
+    "pitch": 1.0,                // ネジピッチ (mm)
+    "tap_depth": 15.0,           // タップ深さ (mm); 貫通の場合は null
+    "drill_diameter": 5.0,       // 下穴径 (mm)
+    "through": false,            // 貫通タップの場合 true
+    "standard": "JIS"            // "JIS" | "ISO" | "UNC" | "UNF" | "other"
+  }}
+
+■ fillet（R面取り）
+  {{
+    "radius": 2.0,
+    "edge_selector": "|Z",       // CadQuery エッジセレクタ (例: "|Z", ">Z or <Z")
+    "quantity": 4                // 対象エッジ本数
+  }}
+
+■ chamfer（C面取り）
+  {{
+    "distance": 1.0,             // 面取り量 (mm)
+    "angle": 45.0,               // 面取り角度 (deg); 45°以外の場合のみ記入
+    "edge_selector": "|Z",
+    "quantity": 2
+  }}
+
+■ slot（長穴）
+  {{"width": 6.0, "length": 20.0, "depth": null, "orientation": "+Z"}}
+
+■ pocket（ポケット）
+  {{"width": 30.0, "height": 20.0, "depth": 5.0}}
 
 【確度の基準】
 - 0.95-1.0: 図面に寸法が明示的に記載されている
@@ -68,6 +108,8 @@ EXTRACT_PROMPT = """添付の2D図面画像と、AIが生成した以下のCadQu
 - CadQueryスクリプト中の `# Feature-NNN:` や `# Hole-NNN:` コメントを要素のラベルに使用
 - cq_fragment は各要素に対応するCadQueryコードの断片（実行可能な形式）
 - orientation は穴やポケットのドリル方向（.faces() の引数に対応）
+- ネジ穴は必ず element_type = "tapped_hole" で出力すること
+- フィレット・シャンファーは element_type = "fillet" / "chamfer" で独立して出力すること
 - base_body（ベースとなるbox等）は必ず最初の要素として含める
 - JSON配列のみを出力してください（説明文は不要）
 """
@@ -132,14 +174,15 @@ def lambda_handler(event: dict, context) -> dict:
     from common.bedrock_client import get_bedrock_client
 
     client = get_bedrock_client(region=BEDROCK_REGION)
-    raw_response = client.invoke_multimodal(
+    invoke_result = client.invoke_multimodal(
         prompt=prompt,
         image_bytes=image_bytes,
         image_media_type=image_media_type,
     )
+    send_token_usage(session_id, "EXTRACTING_DIMENSIONS", invoke_result.input_tokens, invoke_result.output_tokens)
 
     # Parse element list from response
-    elements = _parse_elements(raw_response)
+    elements = _parse_elements(invoke_result.text)
 
     # Store elements in DynamoDB
     elements_table = dynamodb.Table(DRAWING_ELEMENTS_TABLE)
@@ -159,6 +202,7 @@ def lambda_handler(event: dict, context) -> dict:
                 "element_seq": seq,
                 "element_type": elem.get("element_type", "other"),
                 "feature_label": elem.get("feature_label", f"Element-{seq}"),
+                "feature_spec": _float_to_decimal(elem.get("feature_spec", {})),
                 "dimensions": _float_to_decimal(elem.get("dimensions", {})),
                 "position": _float_to_decimal(elem.get("position", {})),
                 "orientation": elem.get("orientation", ""),

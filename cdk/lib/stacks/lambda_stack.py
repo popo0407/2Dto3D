@@ -37,6 +37,8 @@ class LambdaStack(Stack):
         artifacts_bucket: s3.Bucket,
         previews_bucket: s3.Bucket,
         user_pool: cognito.UserPool,
+        build_plans_table: dynamodb.Table | None = None,
+        build_steps_table: dynamodb.Table | None = None,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -129,6 +131,7 @@ class LambdaStack(Stack):
             iam.PolicyStatement(
                 actions=[
                     "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream",
                     "aws-marketplace:ViewSubscriptions",
                     "aws-marketplace:Subscribe",
                 ],
@@ -137,6 +140,100 @@ class LambdaStack(Stack):
         )
         nodes_table.grant_read_write_data(chat_fn)
         artifacts_bucket.grant_read(chat_fn)
+
+        # ---------- BuildPlan Lambda Functions ----------
+        buildplan_env = {
+            **common_env,
+            "BUILD_PLANS_TABLE": build_plans_table.table_name if build_plans_table else "",
+            "BUILD_STEPS_TABLE": build_steps_table.table_name if build_steps_table else "",
+        }
+
+        buildplan_create_fn = create_function(
+            "buildplan_create_handler",
+            timeout_seconds=900,
+            memory_mb=1024,
+            extra_env=buildplan_env,
+        )
+        buildplan_create_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream",
+                    "aws-marketplace:ViewSubscriptions",
+                    "aws-marketplace:Subscribe",
+                ],
+                resources=["*"],
+            )
+        )
+        uploads_bucket.grant_read(buildplan_create_fn)
+        artifacts_bucket.grant_read(buildplan_create_fn)
+        if build_plans_table:
+            build_plans_table.grant_read_write_data(buildplan_create_fn)
+        if build_steps_table:
+            build_steps_table.grant_read_write_data(buildplan_create_fn)
+
+        buildplan_step_fn = create_function(
+            "buildplan_step_handler",
+            timeout_seconds=900,
+            memory_mb=1024,
+            extra_env=buildplan_env,
+        )
+        buildplan_step_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream",
+                    "aws-marketplace:ViewSubscriptions",
+                    "aws-marketplace:Subscribe",
+                ],
+                resources=["*"],
+            )
+        )
+        uploads_bucket.grant_read(buildplan_step_fn)
+        artifacts_bucket.grant_read_write(buildplan_step_fn)
+        previews_bucket.grant_read_write(buildplan_step_fn)
+        connections_table.grant_read_data(buildplan_step_fn)
+        if build_plans_table:
+            build_plans_table.grant_read_write_data(buildplan_step_fn)
+        if build_steps_table:
+            build_steps_table.grant_read_write_data(buildplan_step_fn)
+
+        # ---------- BuildPlan Worker (async AI processing) ----------
+        buildplan_worker_fn = create_function(
+            "buildplan_worker_handler",
+            timeout_seconds=900,
+            memory_mb=1024,
+            extra_env=buildplan_env,
+        )
+        buildplan_worker_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream",
+                    "aws-marketplace:ViewSubscriptions",
+                    "aws-marketplace:Subscribe",
+                ],
+                resources=["*"],
+            )
+        )
+        uploads_bucket.grant_read(buildplan_worker_fn)
+        artifacts_bucket.grant_read_write(buildplan_worker_fn)
+        if build_plans_table:
+            build_plans_table.grant_read_write_data(buildplan_worker_fn)
+        if build_steps_table:
+            build_steps_table.grant_read_write_data(buildplan_worker_fn)
+        nodes_table.grant_read_write_data(buildplan_worker_fn)
+        sessions_table.grant_read_write_data(buildplan_worker_fn)
+
+        # Allow create_fn and step_fn to invoke the worker asynchronously
+        buildplan_worker_fn.grant_invoke(buildplan_create_fn)
+        buildplan_worker_fn.grant_invoke(buildplan_step_fn)
+        buildplan_create_fn.add_environment(
+            "BUILDPLAN_WORKER_FUNCTION_NAME", buildplan_worker_fn.function_name
+        )
+        buildplan_step_fn.add_environment(
+            "BUILDPLAN_WORKER_FUNCTION_NAME", buildplan_worker_fn.function_name
+        )
 
         # ---------- WebSocket API ----------
         ws_connect_fn = lambda_.Function(
@@ -210,6 +307,18 @@ class LambdaStack(Stack):
             auto_deploy=True,
         )
 
+        # Grant BuildPlan functions WebSocket access (must come after WSApi creation)
+        _ws_api_id = self.websocket_api.api_id
+        _ws_manage_arn = f"arn:aws:execute-api:{self.region}:{self.account}:{_ws_api_id}/*"
+        for bp_fn in [buildplan_create_fn, buildplan_step_fn, buildplan_worker_fn]:
+            bp_fn.add_environment("WEBSOCKET_API_ID", _ws_api_id)
+            bp_fn.add_to_role_policy(
+                iam.PolicyStatement(
+                    actions=["execute-api:ManageConnections"],
+                    resources=[_ws_manage_arn],
+                )
+            )
+
         # ---------- REST API ----------
         rest_api = apigw.RestApi(
             self,
@@ -251,6 +360,11 @@ class LambdaStack(Stack):
             "POST", apigw.LambdaIntegration(upload_fn), **auth_kwargs
         )
 
+        drawing_resource = session_resource.add_resource("drawing")
+        drawing_resource.add_method(
+            "GET", apigw.LambdaIntegration(upload_fn), **auth_kwargs
+        )
+
         process_resource = session_resource.add_resource("process")
         process_resource.add_method(
             "POST", apigw.LambdaIntegration(upload_fn), **auth_kwargs
@@ -284,6 +398,60 @@ class LambdaStack(Stack):
         validate_resource = node_resource.add_resource("validate")
         validate_resource.add_method(
             "GET", apigw.LambdaIntegration(history_fn), **auth_kwargs
+        )
+
+        # ---------- BuildPlan API Routes ----------
+        build_plans_resource = session_resource.add_resource("build-plans")
+        build_plans_resource.add_method(
+            "POST", apigw.LambdaIntegration(buildplan_create_fn), **auth_kwargs
+        )
+
+        bp_resource = rest_api.root.add_resource("build-plans")
+        bp_plan_resource = bp_resource.add_resource("{plan_id}")
+        bp_plan_resource.add_method(
+            "GET", apigw.LambdaIntegration(buildplan_step_fn), **auth_kwargs
+        )
+
+        bp_steps_resource = bp_plan_resource.add_resource("steps")
+        bp_steps_resource.add_method(
+            "GET", apigw.LambdaIntegration(buildplan_step_fn), **auth_kwargs
+        )
+
+        bp_step_resource = bp_steps_resource.add_resource("{step_seq}")
+        bp_step_resource.add_method(
+            "GET", apigw.LambdaIntegration(buildplan_step_fn), **auth_kwargs
+        )
+
+        bp_modify_resource = bp_step_resource.add_resource("modify")
+        bp_modify_resource.add_method(
+            "POST", apigw.LambdaIntegration(buildplan_step_fn), **auth_kwargs
+        )
+
+        bp_confirm_resource = bp_step_resource.add_resource("confirm")
+        bp_confirm_resource.add_method(
+            "POST", apigw.LambdaIntegration(buildplan_step_fn), **auth_kwargs
+        )
+
+        bp_revise_resource = bp_step_resource.add_resource("revise")
+        bp_revise_resource.add_method(
+            "POST", apigw.LambdaIntegration(buildplan_step_fn), **auth_kwargs
+        )
+
+        bp_execute_resource = bp_plan_resource.add_resource("execute")
+        bp_execute_resource.add_method(
+            "POST", apigw.LambdaIntegration(buildplan_step_fn), **auth_kwargs
+        )
+
+        # POST /build-plans/{plan_id}/modify — batch multi-step modification
+        bp_batch_modify_resource = bp_plan_resource.add_resource("modify")
+        bp_batch_modify_resource.add_method(
+            "POST", apigw.LambdaIntegration(buildplan_step_fn), **auth_kwargs
+        )
+
+        bp_preview_resource = bp_plan_resource.add_resource("preview")
+        bp_preview_step_resource = bp_preview_resource.add_resource("{step_seq}")
+        bp_preview_step_resource.add_method(
+            "GET", apigw.LambdaIntegration(buildplan_step_fn), **auth_kwargs
         )
 
         CfnOutput(self, "RestApiUrl", value=rest_api.url)

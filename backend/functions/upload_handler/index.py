@@ -44,6 +44,8 @@ def lambda_handler(event: dict, context) -> dict:
         return _presigned_upload(event)
     elif resource == "/sessions/{session_id}/process" and http_method == "POST":
         return _start_processing(event)
+    elif resource == "/sessions/{session_id}/drawing" and http_method == "GET":
+        return _get_drawing(event)
 
     return _response(400, {"error": "Invalid route"})
 
@@ -135,6 +137,30 @@ def _start_processing(event: dict) -> dict:
 
     logger.info("Processing started for session %s", session_id)
     return _response(200, {"session_id": session_id, "status": "PROCESSING"})
+
+
+def _get_drawing(event: dict) -> dict:
+    """Return a presigned GET URL for the session's first uploaded drawing."""
+    session_id = event["pathParameters"]["session_id"]
+    table = dynamodb.Table(SESSIONS_TABLE)
+    resp = table.get_item(Key={"session_id": session_id})
+    session = resp.get("Item")
+    if not session:
+        return _response(404, {"error": "Session not found"})
+    input_files = session.get("input_files", [])
+    if not input_files:
+        return _response(404, {"error": "No drawing found for this session"})
+    s3_key = input_files[0]
+    try:
+        url = s3_client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": UPLOADS_BUCKET, "Key": s3_key},
+            ExpiresIn=3600,
+        )
+    except Exception as exc:
+        logger.error("Failed to generate presigned GET URL for %s: %s", s3_key, exc)
+        return _response(500, {"error": "Could not generate drawing URL"})
+    return _response(200, {"url": url, "s3_key": s3_key})
 
 
 def _get_user_id(event: dict) -> str:

@@ -50,3 +50,6 @@ htmlcov/
 # Logs
 *.log
 .layer_build/
+
+backend/venv_test/
+cdk/venv_cdk/

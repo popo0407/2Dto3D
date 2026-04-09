@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useMemo } from "react";
+import { useState, useRef, useMemo } from "react";
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
@@ -30,7 +30,6 @@ interface VerificationPanelProps {
   isVerifying: boolean;
   currentIteration: number;
   maxIterations: number;
-  onSendComment: (comment: string) => void;
   /** Whether the final 3D model is being generated after verification */
   isBuildingFinal?: boolean;
   /** Currently highlighted element seq */
@@ -229,55 +228,26 @@ export function ElementPreview({ elements, className, highlightedElement }: { el
 /* ---------- Main Panel ---------- */
 
 export function VerificationPanel({
-  sessionId,
+  sessionId: _sessionId,
   elements,
   iterations,
   isVerifying,
   currentIteration,
   maxIterations,
-  onSendComment,
   isBuildingFinal,
   highlightedElement,
   onElementClick,
   onElementDoubleClick,
 }: VerificationPanelProps) {
-  const [comment, setComment] = useState("");
-  const [commentHistory, setCommentHistory] = useState<{ text: string; timestamp: number }[]>([]);
   const [expandedIteration, setExpandedIteration] = useState<number | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
-
-  const handleSend = useCallback(() => {
-    if (!comment.trim() || !sessionId) return;
-    const trimmed = comment.trim();
-    setCommentHistory((prev) => [...prev, { text: trimmed, timestamp: Date.now() }]);
-    onSendComment(trimmed);
-    setComment("");
-  }, [comment, sessionId, onSendComment]);
-
-  const handleElementDoubleClick = useCallback(
-    (label: string) => {
-      setComment((prev) => {
-        const prefix = prev.trim() ? `${prev} ` : "";
-        return `${prefix}[${label}] `;
-      });
-      onElementDoubleClick?.(label);
-    },
-    [onElementDoubleClick],
-  );
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
-  };
 
   const verifiedCount = elements.filter((e) => e.is_verified).length;
   const totalCount = elements.length;
   const overallProgress = totalCount > 0 ? (verifiedCount / totalCount) * 100 : 0;
 
   return (
-    <div className="flex flex-1 flex-col" aria-label="寸法検証パネル">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden" aria-label="寸法検証パネル">
       {/* Progress header */}
       <div className="border-b bg-indigo-50 px-4 py-3">
         <div className="flex items-center justify-between">
@@ -324,7 +294,7 @@ export function VerificationPanel({
                       : "hover:bg-gray-50"
                   }`}
                   onClick={() => onElementClick?.(highlightedElement === elem.element_seq ? null : elem.element_seq)}
-                  onDoubleClick={() => handleElementDoubleClick(elem.feature_label || elem.element_seq)}
+                  onDoubleClick={() => onElementDoubleClick?.(elem.feature_label || elem.element_seq)}
                   role="button"
                   tabIndex={0}
                   aria-selected={highlightedElement === elem.element_seq}
@@ -409,7 +379,7 @@ export function VerificationPanel({
         <div ref={bottomRef} />
       </div>
 
-      {/* Building final 3D model indicator (① fix) */}
+      {/* Building final 3D model indicator */}
       {isBuildingFinal && (
         <div className="flex items-center gap-2 border-t bg-blue-50 px-4 py-3" role="status" aria-label="3Dモデル生成中">
           <div className="h-4 w-4 animate-spin rounded-full border-2 border-blue-300 border-t-blue-600" />
@@ -419,48 +389,6 @@ export function VerificationPanel({
           </div>
         </div>
       )}
-
-      {/* Comment history (② fix) */}
-      {commentHistory.length > 0 && (
-        <div className="max-h-28 overflow-y-auto border-t bg-gray-50 px-3 py-2">
-          <p className="mb-1 text-[10px] font-semibold text-gray-400">送信済みコメント</p>
-          <div className="space-y-1">
-            {commentHistory.map((ch, i) => (
-              <div key={i} className="flex items-start gap-1.5 text-[10px]">
-                <span className="shrink-0 text-gray-300">{new Date(ch.timestamp).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })}</span>
-                <span className="text-gray-600">{ch.text}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Comment input */}
-      <div className="border-t bg-white p-3">
-        <label htmlFor="verify-comment" className="mb-1 block text-xs font-medium text-gray-500">
-          AIへのコメント（次の反復に反映）
-        </label>
-        <div className="flex gap-2">
-          <textarea
-            id="verify-comment"
-            value={comment}
-            onChange={(e) => setComment(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="例: 穴の位置が上面図と一致していません"
-            className="flex-1 resize-none rounded border px-2 py-1.5 text-xs focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
-            rows={2}
-            disabled={!isVerifying}
-          />
-          <button
-            type="button"
-            onClick={handleSend}
-            disabled={!comment.trim() || !isVerifying}
-            className="self-end rounded bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
-          >
-            送信
-          </button>
-        </div>
-      </div>
     </div>
   );
 }

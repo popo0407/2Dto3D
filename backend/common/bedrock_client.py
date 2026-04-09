@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import base64
 import logging
+from dataclasses import dataclass, field
 from typing import Optional
 
 import boto3
@@ -29,6 +30,13 @@ SYSTEM_PROMPT = """あなたは機械設計の専門家であり、CADオペレ�
 - 閉じていないソリッド（Water-tightでない形状）"""
 
 MODEL_ID = "jp.anthropic.claude-sonnet-4-6"
+
+
+@dataclass
+class InvokeResult:
+    text: str
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 class BedrockClient:
@@ -86,13 +94,63 @@ class BedrockClient:
         )
 
         full_text = ""
+        input_tokens = 0
+        output_tokens = 0
         for event in response["body"]:
             chunk = json.loads(event["chunk"]["bytes"])
-            if chunk.get("type") == "content_block_delta":
+            chunk_type = chunk.get("type")
+            if chunk_type == "message_start":
+                usage = chunk.get("message", {}).get("usage", {})
+                input_tokens += usage.get("input_tokens", 0)
+            elif chunk_type == "content_block_delta":
                 delta = chunk.get("delta", {})
                 if delta.get("type") == "text_delta":
                     full_text += delta.get("text", "")
-        return full_text
+            elif chunk_type == "message_delta":
+                usage = chunk.get("usage", {})
+                output_tokens += usage.get("output_tokens", 0)
+        return InvokeResult(text=full_text, input_tokens=input_tokens, output_tokens=output_tokens)
+
+
+    def invoke_with_messages(
+        self,
+        messages: list[dict],
+        system_prompt: str = SYSTEM_PROMPT,
+        max_tokens: int = 4096,
+    ) -> InvokeResult:
+        """Call Claude with a pre-built messages array for multi-turn conversations."""
+        body = json.dumps(
+            {
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": max_tokens,
+                "system": system_prompt,
+                "messages": messages,
+            }
+        )
+        logger.info("Invoking Bedrock model %s with conversation history (streaming)", MODEL_ID)
+        response = self._client.invoke_model_with_response_stream(
+            modelId=MODEL_ID,
+            body=body,
+            contentType="application/json",
+            accept="application/json",
+        )
+        full_text = ""
+        input_tokens = 0
+        output_tokens = 0
+        for event in response["body"]:
+            chunk = json.loads(event["chunk"]["bytes"])
+            chunk_type = chunk.get("type")
+            if chunk_type == "message_start":
+                usage = chunk.get("message", {}).get("usage", {})
+                input_tokens += usage.get("input_tokens", 0)
+            elif chunk_type == "content_block_delta":
+                delta = chunk.get("delta", {})
+                if delta.get("type") == "text_delta":
+                    full_text += delta.get("text", "")
+            elif chunk_type == "message_delta":
+                usage = chunk.get("usage", {})
+                output_tokens += usage.get("output_tokens", 0)
+        return InvokeResult(text=full_text, input_tokens=input_tokens, output_tokens=output_tokens)
 
 
 def get_bedrock_client(region: str = "ap-northeast-1") -> BedrockClient:

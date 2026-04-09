@@ -10,7 +10,7 @@ import os
 import time
 
 import boto3
-from common.ws_notify import send_progress
+from common.ws_notify import send_progress, send_token_usage
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -88,15 +88,16 @@ def lambda_handler(event: dict, context) -> dict:
 
     client = get_bedrock_client(region=BEDROCK_REGION)
     context_json = parsed_data.get("files") if has_dxf else None
-    raw_response = client.invoke_multimodal(
+    invoke_result = client.invoke_multimodal(
         prompt=prompt,
         image_bytes=image_bytes,
         image_media_type=image_media_type,
         context_json=context_json,
     )
+    send_token_usage(session_id, "AI_ANALYZING", invoke_result.input_tokens, invoke_result.output_tokens)
 
     # Parse AI response
-    ai_output = _parse_ai_response(raw_response)
+    ai_output = _parse_ai_response(invoke_result.text)
     cadquery_script = ai_output.get("cadquery_script", "")
     ai_reasoning = ai_output.get("reasoning", "")
 
