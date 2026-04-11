@@ -166,14 +166,31 @@ cd cdk && cdk synth
 
 ## CDK デプロイ
 
+> **ローカル Docker 不要**: ECS Fargate コンテナは AWS CodeBuild でビルド・ECR にプッシュ済みのイメージを参照するため、ローカルに Docker がなくてもどの環境からでも `cdk deploy` できます。
+
+### 前提：ECR への初回ビルド（コンテナ変更時のみ）
+
+コンテナイメージを変更した場合は、AWS CodeBuild プロジェクト `2dto3d-<env>-cadquery-build` を実行してください。  
+設定方法は [docs/container-deployment-strategy.md](docs/container-deployment-strategy.md) を参照。  
+CodeBuild buildspec は `buildspec.yml`（リポジトリルート）に定義済みです。
+
+```bash
+# ECR にイメージが push 済みであることを確認
+aws ecr describe-images \
+  --repository-name 2dto3d-dev-cadquery \
+  --region ap-northeast-1
+```
+
+### CDK デプロイ実行
+
 ```bash
 cd cdk
 
-# dev環境デプロイ
-cdk deploy --all -c environment=dev -c useMockAI=true
+# dev環境デプロイ（Docker 不要）
+cdk deploy --all -c environment=dev
 
-# prod環境デプロイ
-cdk deploy --all -c environment=prod -c useMockAI=false -c account=<ACCOUNT_ID> -c region=ap-northeast-1
+# prod環境デプロイ（Docker 不要）
+cdk deploy --all -c environment=prod -c account=<ACCOUNT_ID> -c region=ap-northeast-1
 ```
 
 ## テスト

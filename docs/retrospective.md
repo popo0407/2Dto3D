@@ -746,3 +746,84 @@ Frontend: GET /build-plans/{id} を 3 秒ごとにポーリング
 | ファイル | 変更内容 |
 | --- | --- |
 | `backend/functions/buildplan_worker_handler/index.py` | `REVISE_SYSTEM_PROMPT`強化、合成初回ユーザーメッセージを`NEXT_STEP_PROMPT`に変更、最終ユーザーメッセージを強化 |
+
+---
+
+## 2026-04-09: Docker 不要デプロイ対応（ContainerImage.from_registry 方式）
+
+### 実施内容
+- `cdk/lib/stacks/pipeline_stack.py` の ECS コンテナ参照方式を変更
+- `ContainerImage.from_asset()` → `ContainerImage.from_registry()` に変更
+- `buildspec.yml`（CodeBuild 用）をリポジトリルートに追加
+- `README.md` にデプロイ前提条件を追記
+
+### 問題の原因
+
+| 問題 | 原因 |
+|------|------|
+| Docker なし環境で `cdk deploy` が `Failed to find and execute 'docker'` で失敗 | `ContainerImage.from_asset()` は `cdk deploy` 実行時にローカルで `docker build` を自動実行する。Windows など Docker 未インストール環境では環境の準備が困難 |
+| `runner.py` の修正が ECS コンテナに反映されない | Docker ビルドが走らないためイメージが更新されず、古いコンテナが使われ続ける |
+
+### 対処
+
+| 変更 | ファイル | 内容 |
+|------|----------|------|
+| `from_asset()` → `from_registry()` | `cdk/lib/stacks/pipeline_stack.py` | ECR に push 済みのイメージを参照するだけに変更。URI は `<account>.dkr.ecr.<region>.amazonaws.com/<project>-<env>-cadquery:latest` と動的構築 |
+| `buildspec.yml` 追加（新規） | `buildspec.yml` | AWS CodeBuild でコンテナをビルドして ECR に push するビルドスペック。`ENV_NAME` 変数で dev/prod の ECR リポジトリを切り替え可能 |
+| CDK デプロイ手順更新 | `README.md` | 「ECR への初回ビルド」の前提条件と確認コマンドを追記 |
+
+### アーキテクチャの変化
+
+```
+【変更前】
+cdk deploy 実行
+  ↓ from_asset() が自動的にローカル docker build を実行
+  ❌ Docker 未インストール環境で失敗
+
+【変更後】
+① AWS CodeBuild (buildspec.yml) で docker build → ECR push（手動 or 自動トリガー）
+② cdk deploy 実行
+     ↓ from_registry() は ECR URI を参照するだけ
+  ✅ Docker 不要でどの環境からでも成功
+```
+
+### 改善策・再発防止
+- ECS Fargate コンテナは **`from_registry()` + CodeBuild** の組み合わせを標準とする。`from_asset()` はローカル Docker の強制依存が生まれるため本番デプロイには使わない
+- ECR URI は `self.account`, `self.region`, `env_name`, `project_name` から動的構築することで dev/prod 両環境に対応可能
+- コンテナイメージを変更した場合は CodeBuild を手動実行して ECR にプッシュしてから `cdk deploy` を行う
+- CodeBuild サービスロールには ECR push 権限（`ecr:PutImage` 等）と `ecr:GetAuthorizationToken` を最小権限で付与する
+---
+
+## 2026-04-11: CSGプレビュー 円形ポケット解析失敗修正
+
+### 発生した問題
+ブラウザCSGプレビュー（`cqPreview.ts`）で2件の警告が表示された。
+1. `⚠ Step 0004: ポケットを解析できず`
+2. `⚠ 外周下端C面取り（45°×10mm）: エッジ処理はプレビューでは省略`
+
+### 根本原因
+
+| 問題 | 原因 |
+|------|------|
+| Step 0004「ポケットを解析できず」 | `cqPreview.ts` の `pocket` ケースは `parseRect()` で `.rect(w, h)` を探すが、AIが生成したポケットCQコードが `.circle(70).circle(63).cutBlind(20)`（環状溝）だったため、矩形パーサーがマッチしなかった |
+| C面取り省略メッセージ | `chamfer`/`fillet` は `three-bvh-csg` ではエッジ位相演算が必要なため実装不可能。設計上の制限で省略ノートを追加するのみ |
+
+### 対処
+
+| 対処 | ファイル |
+|------|----------|
+| `parseCircles()` 関数を追加 — CQコード内の全 `.circle(r)` を配列で返す | `frontend/src/utils/cqPreview.ts` |
+| `parseCutBlind()` の正規表現を `(-?[\d.]+)` に修正し `Math.abs()` で負値対応 | `frontend/src/utils/cqPreview.ts` |
+| `pocket` ケースを拡張: `parseRect` で矩形を試し、失敗した場合 `parseCircles` で円形ポケット（単円・環状）を処理 | `frontend/src/utils/cqPreview.ts` |
+| 環状ポケット（`.circle(R).circle(r).cutBlind(d)`）は外径で切削し、内側省略ノートを追加 | `frontend/src/utils/cqPreview.ts` |
+
+### 実際のDynamoDBデータ（Step 0004）
+```python
+# step_type: pocket
+result = result.faces('>Z').workplane(offset=-20).circle(70).circle(63).cutBlind(20)
+```
+
+### 改善策・再発防止
+- `buildplan_worker_handler` がAIに指示するプロンプトにはポケット形状として矩形（`.rect()`）と円形（`.circle()`）の両方が含まれるため、パーサーは両方に対応する必要がある
+- CQコードのparserを追加・変更した際はDynamoDBの実データで検証する
+- `chamfer`/`fillet` はブラウザCSGの設計上の制限。UIに「プレビューでは省略」と表示するのは正しい動作

@@ -4,6 +4,7 @@ from aws_cdk import (
     Stack,
     Duration,
     RemovalPolicy,
+    aws_codebuild as codebuild,
     aws_ecs as ecs,
     aws_ec2 as ec2,
     aws_iam as iam,
@@ -17,6 +18,7 @@ from aws_cdk import (
     aws_lambda_event_sources as event_sources,
     aws_apigatewayv2 as apigwv2,
     CfnOutput,
+    aws_ecr as ecr,
 )
 from constructs import Construct
 
@@ -160,6 +162,86 @@ class PipelineStack(Stack):
             memory_mb=256,
         )
 
+        # ---------- CodeBuild Setup ----------
+        # CodeBuild: Docker イメージをビルドして ECR に push するプロジェクト
+        # これにより、ローカル Docker 環境がなくても cdk deploy できる
+        ecr_repository = ecr.Repository(
+            self,
+            "CadQueryRepository",
+            repository_name=f"{project_name}-{env_name}-cadquery",
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+
+        codebuild_role = iam.Role(
+            self,
+            "CodeBuildRole",
+            assumed_by=iam.ServicePrincipal("codebuild.amazonaws.com"),
+            role_name=f"{project_name}-{env_name}-cadquery-codebuild-role",
+        )
+
+        # ECR push 権限
+        ecr_repository.grant_push(codebuild_role)
+
+        # CloudWatch Logs 権限
+        codebuild_role.add_to_principal_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "logs:CreateLogGroup",
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents",
+                ],
+                resources=[
+                    f"arn:aws:logs:{self.region}:{self.account}:log-group:/aws/codebuild/*"
+                ],
+            )
+        )
+
+        # CodeBuild プロジェクトの作成
+        codebuild_project = codebuild.Project(
+            self,
+            "CadQueryBuildProject",
+            project_name=f"{project_name}-{env_name}-cadquery-build",
+            source=codebuild.Source.git_hub(
+                owner="popo0407",
+                repo="2Dto3D",
+                branch_or_ref="main",
+                clone_depth=1,
+            ),
+            environment=codebuild.BuildEnvironment(
+                build_image=codebuild.LinuxBuildImage.STANDARD_7_0,
+                privileged=True,  # Docker ビルドのため必須
+            ),
+            environment_variables={
+                "AWS_ACCOUNT_ID": codebuild.BuildEnvironmentVariable(
+                    value=self.account
+                ),
+                "AWS_DEFAULT_REGION": codebuild.BuildEnvironmentVariable(
+                    value=self.region
+                ),
+                "IMAGE_REPO_NAME": codebuild.BuildEnvironmentVariable(
+                    value=ecr_repository.repository_name
+                ),
+                "IMAGE_TAG": codebuild.BuildEnvironmentVariable(value="latest"),
+            },
+            role=codebuild_role,
+        )
+
+        # CodeBuild プロジェクトの出力
+        CfnOutput(
+            self,
+            "CodeBuildProjectName",
+            value=codebuild_project.project_name,
+            description="CodeBuild project name for building CadQuery container",
+        )
+
+        CfnOutput(
+            self,
+            "ECRRepositoryUri",
+            value=ecr_repository.repository_uri,
+            description="ECR repository URI for CadQuery container",
+        )
+
         # ---------- Step 3: CadQuery Runner ----------
         # enable_fargate=True (prod): ECS Fargate で実際の CadQuery を実行する
         # enable_fargate=False (dev): Docker ビルド不要のモック Lambda でプレースホルダーを生成する
@@ -186,13 +268,29 @@ class PipelineStack(Stack):
                 vpc=vpc,
             )
 
+            # ECS タスク実行ロールを作成（ECR pull 権限付き）
+            execution_role = iam.Role(
+                self,
+                "CadQueryTaskExecutionRole",
+                assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
+            )
+            execution_role.add_managed_policy(
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "service-role/AmazonECSTaskExecutionRolePolicy"
+                )
+            )
+
             task_definition = ecs.FargateTaskDefinition(
                 self,
                 "CadQueryTaskDef",
                 family=f"{project_name}-{env_name}-cadquery-runner",
                 cpu=2048,
                 memory_limit_mib=4096,
+                execution_role=execution_role,
             )
+
+            # ECR リポジトリから pull する権限を付与
+            ecr_repository.grant_pull(execution_role)
 
             uploads_bucket.grant_read(task_definition.task_role)
             artifacts_bucket.grant_read_write(task_definition.task_role)
@@ -220,7 +318,10 @@ class PipelineStack(Stack):
             container = task_definition.add_container(
                 "CadQueryContainer",
                 container_name="cadquery-runner",
-                image=ecs.ContainerImage.from_asset("../backend/functions/cadquery_runner"),
+                image=ecs.ContainerImage.from_ecr_repository(
+                    ecr_repository,
+                    tag="latest",
+                ),
                 logging=ecs.LogDrivers.aws_logs(
                     stream_prefix="cadquery", log_group=log_group
                 ),

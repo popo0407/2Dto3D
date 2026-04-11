@@ -21,8 +21,6 @@
  */
 
 import * as THREE from "three";
-// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-// @ts-ignore – three-bvh-csg v0.0.18 lacks full TS declarations
 import { Evaluator, Brush, SUBTRACTION } from "three-bvh-csg";
 import type { BuildStep } from "../components/BuildPlanPanel";
 
@@ -89,8 +87,17 @@ function parseRect(code: string) {
 }
 
 function parseCutBlind(code: string) {
-  const m = code.match(/\.cutBlind\(\s*([\d.]+)\s*\)/);
-  return m ? f(m, 1) : null;
+  const m = code.match(/\.cutBlind\(\s*(-?[\d.]+)\s*\)/);
+  return m ? Math.abs(f(m, 1)) : null;
+}
+
+/** Returns all radii from .circle(r) calls in order (outermost approaches) */
+function parseCircles(code: string): number[] {
+  const radii: number[] = [];
+  for (const m of code.matchAll(/\.circle\(\s*([\d.]+)\s*\)/g)) {
+    radii.push(parseFloat(m[1] ?? "0"));
+  }
+  return radii;
 }
 
 function parseSlot2D(code: string) {
@@ -184,27 +191,22 @@ function cutterTransform(
 // CSG helpers
 // ---------------------------------------------------------------------------
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let _evaluator: any = null;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function getEvaluator(): any {
+let _evaluator: Evaluator | null = null;
+function getEvaluator(): Evaluator {
   return (_evaluator ??= new Evaluator());
 }
 
-function makeBrush(geo: THREE.BufferGeometry, pos?: THREE.Vector3, rot?: THREE.Euler): typeof Brush {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const b = new Brush(geo) as any;
+function makeBrush(geo: THREE.BufferGeometry, pos?: THREE.Vector3, rot?: THREE.Euler): Brush {
+  const b = new Brush(geo);
   if (pos) b.position.copy(pos);
   if (rot) b.rotation.copy(rot);
   b.updateMatrixWorld(true);
   return b;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function safeCut(baseBrush: any, cutterBrush: any, notes: string[], stepSeq: string): any {
+function safeCut(baseBrush: Brush, cutterBrush: Brush, notes: string[], stepSeq: string): Brush | null {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const result = new Brush() as any;
+    const result = new Brush();
     getEvaluator().evaluate(baseBrush, cutterBrush, SUBTRACTION, result);
     result.geometry.computeVertexNormals();
     return result;
@@ -231,8 +233,7 @@ export function buildCumulativePreview(
     .filter((s) => s.step_seq <= upToSeq)
     .sort((a, b) => a.step_seq.localeCompare(b.step_seq));
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let baseBrush: any = null;
+  let baseBrush: Brush | null = null;
   let dims: BodyDims = { w: 50, d: 30, h: 10 };
 
   for (const step of steps) {
@@ -308,19 +309,40 @@ export function buildCumulativePreview(
         // -------- Pocket --------
         case "pocket": {
           if (!baseBrush) break;
-          const rect = parseRect(code);
           const depth = parseCutBlind(code);
-          if (!rect || !depth) { notes.push(`Step ${step.step_seq}: ポケットを解析できず`); break; }
+          if (!depth) { notes.push(`Step ${step.step_seq}: ポケットを解析できず`); break; }
           const face = parseFace(code);
           const centerOff = parseCenter(code) ?? { x: 0, y: 0 };
           const pts = parsePushPoints(code);
           const origin = pts[0] ?? { x: 0, y: 0 };
           const pt = { x: origin.x + centerOff.x, y: origin.y + centerOff.y };
           const { pos, rot, height } = cutterTransform(face, pt, dims, depth);
-          const pocketGeo = new THREE.BoxGeometry(rect.w, height, rect.h);
-          const cutter = makeBrush(pocketGeo, pos, rot);
-          const result = safeCut(baseBrush, cutter, notes, step.step_seq);
-          if (result) baseBrush = result;
+          const rect = parseRect(code);
+          if (rect) {
+            // Rectangular pocket
+            const pocketGeo = new THREE.BoxGeometry(rect.w, height, rect.h);
+            const cutter = makeBrush(pocketGeo, pos, rot);
+            const result = safeCut(baseBrush, cutter, notes, step.step_seq);
+            if (result) baseBrush = result;
+          } else {
+            // Circular pocket: .circle(r).cutBlind(d) or annular .circle(R).circle(r).cutBlind(d)
+            const circles = parseCircles(code);
+            if (circles.length >= 1) {
+              const outerR = Math.max(...circles);
+              const cylGeo = new THREE.CylinderGeometry(outerR, outerR, height, 64);
+              const cutter = makeBrush(cylGeo, pos, rot);
+              const result = safeCut(baseBrush, cutter, notes, step.step_seq);
+              if (result) {
+                baseBrush = result;
+                if (circles.length >= 2) {
+                  const innerD = Math.min(...circles) * 2;
+                  notes.push(`Step ${step.step_seq}: 環状ポケット（内側φ${innerD}mmの残留部は省略）`);
+                }
+              }
+            } else {
+              notes.push(`Step ${step.step_seq}: ポケットを解析できず`);
+            }
+          }
           break;
         }
 
