@@ -21,8 +21,6 @@
  */
 
 import * as THREE from "three";
-// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-// @ts-ignore – three-bvh-csg v0.0.18 lacks full TS declarations
 import { Evaluator, Brush, SUBTRACTION } from "three-bvh-csg";
 import type { BuildStep } from "../components/BuildPlanPanel";
 
@@ -193,27 +191,22 @@ function cutterTransform(
 // CSG helpers
 // ---------------------------------------------------------------------------
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let _evaluator: any = null;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function getEvaluator(): any {
+let _evaluator: Evaluator | null = null;
+function getEvaluator(): Evaluator {
   return (_evaluator ??= new Evaluator());
 }
 
-function makeBrush(geo: THREE.BufferGeometry, pos?: THREE.Vector3, rot?: THREE.Euler): typeof Brush {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const b = new Brush(geo) as any;
+function makeBrush(geo: THREE.BufferGeometry, pos?: THREE.Vector3, rot?: THREE.Euler): Brush {
+  const b = new Brush(geo);
   if (pos) b.position.copy(pos);
   if (rot) b.rotation.copy(rot);
   b.updateMatrixWorld(true);
   return b;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function safeCut(baseBrush: any, cutterBrush: any, notes: string[], stepSeq: string): any {
+function safeCut(baseBrush: Brush, cutterBrush: Brush, notes: string[], stepSeq: string): Brush | null {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const result = new Brush() as any;
+    const result = new Brush();
     getEvaluator().evaluate(baseBrush, cutterBrush, SUBTRACTION, result);
     result.geometry.computeVertexNormals();
     return result;
@@ -240,8 +233,7 @@ export function buildCumulativePreview(
     .filter((s) => s.step_seq <= upToSeq)
     .sort((a, b) => a.step_seq.localeCompare(b.step_seq));
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let baseBrush: any = null;
+  let baseBrush: Brush | null = null;
   let dims: BodyDims = { w: 50, d: 30, h: 10 };
 
   for (const step of steps) {
