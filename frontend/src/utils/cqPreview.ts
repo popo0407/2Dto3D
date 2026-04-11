@@ -89,8 +89,17 @@ function parseRect(code: string) {
 }
 
 function parseCutBlind(code: string) {
-  const m = code.match(/\.cutBlind\(\s*([\d.]+)\s*\)/);
-  return m ? f(m, 1) : null;
+  const m = code.match(/\.cutBlind\(\s*(-?[\d.]+)\s*\)/);
+  return m ? Math.abs(f(m, 1)) : null;
+}
+
+/** Returns all radii from .circle(r) calls in order (outermost approaches) */
+function parseCircles(code: string): number[] {
+  const radii: number[] = [];
+  for (const m of code.matchAll(/\.circle\(\s*([\d.]+)\s*\)/g)) {
+    radii.push(parseFloat(m[1] ?? "0"));
+  }
+  return radii;
 }
 
 function parseSlot2D(code: string) {
@@ -308,19 +317,40 @@ export function buildCumulativePreview(
         // -------- Pocket --------
         case "pocket": {
           if (!baseBrush) break;
-          const rect = parseRect(code);
           const depth = parseCutBlind(code);
-          if (!rect || !depth) { notes.push(`Step ${step.step_seq}: ポケットを解析できず`); break; }
+          if (!depth) { notes.push(`Step ${step.step_seq}: ポケットを解析できず`); break; }
           const face = parseFace(code);
           const centerOff = parseCenter(code) ?? { x: 0, y: 0 };
           const pts = parsePushPoints(code);
           const origin = pts[0] ?? { x: 0, y: 0 };
           const pt = { x: origin.x + centerOff.x, y: origin.y + centerOff.y };
           const { pos, rot, height } = cutterTransform(face, pt, dims, depth);
-          const pocketGeo = new THREE.BoxGeometry(rect.w, height, rect.h);
-          const cutter = makeBrush(pocketGeo, pos, rot);
-          const result = safeCut(baseBrush, cutter, notes, step.step_seq);
-          if (result) baseBrush = result;
+          const rect = parseRect(code);
+          if (rect) {
+            // Rectangular pocket
+            const pocketGeo = new THREE.BoxGeometry(rect.w, height, rect.h);
+            const cutter = makeBrush(pocketGeo, pos, rot);
+            const result = safeCut(baseBrush, cutter, notes, step.step_seq);
+            if (result) baseBrush = result;
+          } else {
+            // Circular pocket: .circle(r).cutBlind(d) or annular .circle(R).circle(r).cutBlind(d)
+            const circles = parseCircles(code);
+            if (circles.length >= 1) {
+              const outerR = Math.max(...circles);
+              const cylGeo = new THREE.CylinderGeometry(outerR, outerR, height, 64);
+              const cutter = makeBrush(cylGeo, pos, rot);
+              const result = safeCut(baseBrush, cutter, notes, step.step_seq);
+              if (result) {
+                baseBrush = result;
+                if (circles.length >= 2) {
+                  const innerD = Math.min(...circles) * 2;
+                  notes.push(`Step ${step.step_seq}: 環状ポケット（内側φ${innerD}mmの残留部は省略）`);
+                }
+              }
+            } else {
+              notes.push(`Step ${step.step_seq}: ポケットを解析できず`);
+            }
+          }
           break;
         }
 
