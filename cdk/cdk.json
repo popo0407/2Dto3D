@@ -3,7 +3,7 @@
   "context": {
     "account": "590184009554",
     "environment": "dev",
-    "enableFargate": true,
+    "enableFargate": false,
     "bedrockRegion": "ap-northeast-1"
   },
   "watch": {
