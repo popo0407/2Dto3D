@@ -115,6 +115,29 @@ function parseCenter(code: string) {
   return m ? { x: f(m, 1), y: f(m, 2) } : null;
 }
 
+/** Extract positions from .transformed(offset=cq.Vector(x, y, ...)) patterns */
+function parseTransformedPoints(code: string): { x: number; y: number }[] {
+  const pts: { x: number; y: number }[] = [];
+  for (const m of code.matchAll(/\.transformed\([^)]*offset\s*=\s*(?:cq\.Vector\()?\s*([-\d.]+)\s*,\s*([-\d.]+)/g)) {
+    pts.push({ x: parseFloat(m[1]!), y: parseFloat(m[2]!) });
+  }
+  return pts;
+}
+
+/**
+ * Extract (x, y) tuples from a list literal that contains only numeric 2D tuples.
+ * e.g. [(60.1, 60.1), (-60.1, 60.1), (-60.1, -60.1), (60.1, -60.1)]
+ */
+function extractTupleList(code: string): { x: number; y: number }[] {
+  const pts: { x: number; y: number }[] = [];
+  const listMatch = code.match(/\[(?:\s*\(\s*-?[\d.]+\s*,\s*-?[\d.]+\s*\)\s*,?\s*)+\]/);
+  if (!listMatch) return pts;
+  for (const m of listMatch[0].matchAll(/\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)/g)) {
+    pts.push({ x: parseFloat(m[1]!), y: parseFloat(m[2]!) });
+  }
+  return pts;
+}
+
 // ---------------------------------------------------------------------------
 // Coordinate helpers
 // ---------------------------------------------------------------------------
@@ -271,18 +294,45 @@ export function buildCumulativePreview(
         case "tapped_hole": {
           if (!baseBrush) break;
           const hole = parseHole(code);
-          if (!hole) {
-            notes.push(`Step ${step.step_seq}: 穴寸法を解析できず`);
-            break;
-          }
           const face = parseFace(code);
-          const pts = parsePushPoints(code);
-          for (const pt of pts) {
-            const { pos, rot, height } = cutterTransform(face, pt, dims, hole.depth);
-            const cylGeo = new THREE.CylinderGeometry(hole.d / 2, hole.d / 2, height, 32);
-            const cutter = makeBrush(cylGeo, pos, rot);
-            const result = safeCut(baseBrush, cutter, notes, step.step_seq);
-            if (result) baseBrush = result;
+
+          if (hole) {
+            // Standard .hole() path
+            let pts = parsePushPoints(code);
+            // If parsePushPoints only found default origin (e.g. positions were computed variables),
+            // try extracting from an explicit tuple list in the code
+            const firstPt = pts[0];
+            if (pts.length === 1 && firstPt !== undefined && firstPt.x === 0 && firstPt.y === 0) {
+              const listPts = extractTupleList(code);
+              if (listPts.length > 0) pts = listPts;
+            }
+            for (const pt of pts) {
+              const { pos, rot, height } = cutterTransform(face, pt, dims, hole.depth);
+              const cylGeo = new THREE.CylinderGeometry(hole.d / 2, hole.d / 2, height, 32);
+              const cutter = makeBrush(cylGeo, pos, rot);
+              const result = safeCut(baseBrush, cutter, notes, step.step_seq);
+              if (result) baseBrush = result;
+            }
+          } else {
+            // Fallback: handle result.cut(cq.Workplane().cylinder(...)) pattern
+            const cyl = parseCylinder(code);
+            if (cyl) {
+              // Try .transformed(offset=cq.Vector(x, y, z)) positions first
+              let pts = parseTransformedPoints(code);
+              // If none, try explicit tuple list
+              if (pts.length === 0) pts = extractTupleList(code);
+              // If still none, fall back to origin
+              if (pts.length === 0) pts = [{ x: 0, y: 0 }];
+              for (const pt of pts) {
+                const { pos, rot, height } = cutterTransform(face, pt, dims, null); // through-all
+                const cylGeo = new THREE.CylinderGeometry(cyl.r, cyl.r, height, 32);
+                const cutter = makeBrush(cylGeo, pos, rot);
+                const result = safeCut(baseBrush, cutter, notes, step.step_seq);
+                if (result) baseBrush = result;
+              }
+            } else {
+              notes.push(`Step ${step.step_seq}: 穴寸法を解析できず`);
+            }
           }
           break;
         }

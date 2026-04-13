@@ -48,9 +48,12 @@ NEXT_STEP_PROMPT = """添付の2D図面を見て、3Dモデルを段階的に構
 【次のステップを1つ提案してください】
 - 確定済みステップの続きとして次に行う加工を1つだけ提案してください
 - 最初のステップは必ず base_body（直方体・円柱などのベース形状）にしてください
-- 穴あけは必ず .faces("...").workplane().pushPoints([...]).hole(d) 形式
+- 穴あけは必ず result.faces("...").workplane().pushPoints([(x1,y1),(x2,y2),...]).hole(直径) 形式のみ使用
+  ※ result.cut() や .transformed()+.cutBlind() による穴あけは絶対禁止
+  ※ pushPoints 内座標は必ず計算済み数値リテラル（例: [(60.1,60.1),(-60.1,60.1)] ○ / math.cos等の計算式・変数禁止 ✗）
 - ポケット加工は必ず .faces("<Z または >Z").workplane().circle(半径).cutBlind(深さ) 形式（矩形は .rect(w,h).cutBlind(深さ)）
 - cq_code 内の寸法値はすべて数値リテラル（変数名禁止、例: .circle(63) ○、.circle(r) ✗）
+- cq_code 内に import 文を書かない
 - 全ての加工が完了した場合は {{"is_complete": true}} のみを返してください
 
 【step_type 一覧】
@@ -89,7 +92,15 @@ REVISE_SYSTEM_PROMPT = """あなたは機械設計の専門家でありCADオペ
 ユーザーが直前のあなたの提案に対して指摘・修正を行っています。
 その指摘内容を必ず反映し、前回と同じ内容を繰り返さないでください。
 修正が必要な箇所だけ変更し、同じJSON形式（is_complete, step_type, step_name, parameters, cq_code, group_id, confidence, explanation, choices）で修正版を返してください。
-JSON のみ出力してください。"""
+JSON のみ出力してください。
+
+【cq_code 形式の厳守事項（修正時も必ず守ること）】
+- 穴あけ（hole_through / hole_blind / tapped_hole）: result.faces("...").workplane().pushPoints([(x1,y1),(x2,y2),...]).hole(直径) のみ使用可
+  ※ result.cut() による穴あけ禁止、.transformed()+.cutBlind() による穴あけ禁止
+- pushPoints 内の座標: 計算済みの数値リテラルのみ（例: (60.1, 60.1)）。math.cos 等の計算式・変数は禁止
+- ポケット: result.faces("...").workplane().circle(r).cutBlind(d) または .rect(w,h).cutBlind(d)
+- cq_code 内に import 文を書かない
+- 寸法値はすべて数値リテラル（変数名禁止）"""
 
 
 
