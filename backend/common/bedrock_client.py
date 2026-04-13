@@ -48,20 +48,43 @@ class BedrockClient:
         prompt: str,
         image_bytes: Optional[bytes] = None,
         image_media_type: str = "image/png",
+        images: Optional[list[dict]] = None,
         context_json: Optional[dict] = None,
         system_prompt: str = SYSTEM_PROMPT,
         max_tokens: int = 8192,
-    ) -> str:
+    ) -> "InvokeResult":
+        """Invoke Bedrock with optional multiple images.
+
+        Preferred: pass ``images`` as a list of dicts with keys:
+            - ``bytes``: raw image bytes
+            - ``media_type``: e.g. "image/png"
+            - ``description`` (optional): short label shown before the image
+
+        Legacy: ``image_bytes`` / ``image_media_type`` still accepted for
+        callers that pass a single image.
+        """
         content: list[dict] = []
 
-        if image_bytes:
+        # Normalise to a unified images list
+        effective_images: list[dict] = []
+        if images:
+            effective_images = images
+        elif image_bytes:
+            effective_images = [{"bytes": image_bytes, "media_type": image_media_type}]
+
+        for idx, img in enumerate(effective_images):
+            desc = img.get("description", "").strip()
+            if desc:
+                content.append({"type": "text", "text": f"【図面 {idx + 1}: {desc}】"})
+            elif len(effective_images) > 1:
+                content.append({"type": "text", "text": f"【図面 {idx + 1}】"})
             content.append(
                 {
                     "type": "image",
                     "source": {
                         "type": "base64",
-                        "media_type": image_media_type,
-                        "data": base64.b64encode(image_bytes).decode(),
+                        "media_type": img.get("media_type", "image/png"),
+                        "data": base64.b64encode(img["bytes"]).decode(),
                     },
                 }
             )

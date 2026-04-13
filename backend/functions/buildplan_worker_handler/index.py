@@ -125,7 +125,13 @@ def _handle_next_step(event: dict) -> None:
     try:
         sessions_table = dynamodb.Table(SESSIONS_TABLE)
         session = sessions_table.get_item(Key={"session_id": session_id}).get("Item", {})
-        image_bytes, image_media_type = _load_first_image(session)
+        images = _load_all_images(session)
+        drawing_notes: str = session.get("drawing_notes", "")
+
+        # Build drawing notes prefix for prompt
+        notes_prefix = ""
+        if drawing_notes:
+            notes_prefix = f"\n【ユーザー提供の図面情報・メモ】\n{drawing_notes}\n上記の情報を最優先で参照してください。\n"
 
         # Get confirmed steps in order
         all_steps = _query_all_steps(plan_id, steps_table)
@@ -148,9 +154,8 @@ def _handle_next_step(event: dict) -> None:
         from common.bedrock_client import get_bedrock_client
         client = get_bedrock_client(region=BEDROCK_REGION)
         invoke_result = client.invoke_multimodal(
-            prompt=NEXT_STEP_PROMPT.format(confirmed_steps=confirmed_summary),
-            image_bytes=image_bytes,
-            image_media_type=image_media_type,
+            prompt=notes_prefix + NEXT_STEP_PROMPT.format(confirmed_steps=confirmed_summary),
+            images=images if images else None,
             system_prompt=INTERACTIVE_SYSTEM_PROMPT,
             max_tokens=4096,
         )
@@ -273,7 +278,11 @@ def _handle_revise_step(event: dict) -> None:
     try:
         sessions_table = dynamodb.Table(SESSIONS_TABLE)
         session = sessions_table.get_item(Key={"session_id": session_id}).get("Item", {})
-        image_bytes, image_media_type = _load_first_image(session)
+        images = _load_all_images(session)
+        drawing_notes: str = session.get("drawing_notes", "")
+        notes_prefix = ""
+        if drawing_notes:
+            notes_prefix = f"\n【ユーザー提供の図面情報・メモ】\n{drawing_notes}\n上記の情報を最優先で参照してください。\n"
 
         # Load step and confirmed summary
         step_resp = steps_table.get_item(Key={"plan_id": plan_id, "step_seq": step_seq})
@@ -290,21 +299,26 @@ def _handle_revise_step(event: dict) -> None:
         else:
             confirmed_summary = "（確定済みステップなし）"
 
-        # Build messages: synthetic first user (image + original NEXT_STEP_PROMPT), then conversation, then new user
+        # Build messages: synthetic first user (images + original NEXT_STEP_PROMPT), then conversation, then new user
         import base64
         initial_user_content: list = []
-        if image_bytes:
+        for idx, img in enumerate(images):
+            desc = img.get("description", "").strip()
+            if desc:
+                initial_user_content.append({"type": "text", "text": f"【図面 {idx + 1}: {desc}】"})
+            elif len(images) > 1:
+                initial_user_content.append({"type": "text", "text": f"【図面 {idx + 1}】"})
             initial_user_content.append({
                 "type": "image",
                 "source": {
                     "type": "base64",
-                    "media_type": image_media_type,
-                    "data": base64.b64encode(image_bytes).decode(),
+                    "media_type": img.get("media_type", "image/png"),
+                    "data": base64.b64encode(img["bytes"]).decode(),
                 },
             })
         initial_user_content.append({
             "type": "text",
-            "text": NEXT_STEP_PROMPT.format(confirmed_steps=confirmed_summary),
+            "text": notes_prefix + NEXT_STEP_PROMPT.format(confirmed_steps=confirmed_summary),
         })
 
         messages: list[dict] = [{"role": "user", "content": initial_user_content}]
@@ -409,21 +423,29 @@ def _query_all_steps(plan_id: str, steps_table) -> list[dict]:
     return sorted(items, key=lambda x: x.get("step_seq", ""))
 
 
-def _load_first_image(session: dict) -> tuple:
+def _load_all_images(session: dict) -> list[dict]:
+    """Load all image files from session, returning list of {bytes, media_type, description} dicts."""
     input_files = session.get("input_files", [])
+    descriptions = session.get("input_file_descriptions", {})
+    media_map = {
+        "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+        "tiff": "image/tiff", "tif": "image/tiff",
+    }
+    images: list[dict] = []
     for f in input_files:
         ext = f.rsplit(".", 1)[-1].lower() if "." in f else ""
-        if ext in ("png", "jpg", "jpeg", "tiff", "tif"):
-            try:
-                obj = s3_client.get_object(Bucket=UPLOADS_BUCKET, Key=f)
-                media_map = {
-                    "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
-                    "tiff": "image/tiff", "tif": "image/tiff",
-                }
-                return obj["Body"].read(), media_map.get(ext, "image/png")
-            except Exception as exc:
-                logger.warning("Failed to load image %s: %s", f, exc)
-    return None, "image/png"
+        if ext not in media_map:
+            continue
+        try:
+            obj = s3_client.get_object(Bucket=UPLOADS_BUCKET, Key=f)
+            images.append({
+                "bytes": obj["Body"].read(),
+                "media_type": media_map.get(ext, "image/png"),
+                "description": descriptions.get(f, ""),
+            })
+        except Exception as exc:
+            logger.warning("Failed to load image %s: %s", f, exc)
+    return images
 
 
 def _load_parsed_data(session_id: str) -> dict:

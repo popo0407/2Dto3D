@@ -63,25 +63,29 @@ def lambda_handler(event: dict, context) -> dict:
         },
     )
 
-    # Load first image for multimodal analysis
-    image_bytes = None
-    image_media_type = "image/png"
+    # Load ALL images for multimodal analysis (up to 5)
+    MEDIA_MAP = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "tiff": "image/tiff", "tif": "image/tiff"}
     image_keys = parsed_data.get("image_keys", [])
-    if image_keys:
+    image_descriptions = parsed_data.get("image_descriptions", {})
+    images: list[dict] = []
+    for key in image_keys:
         try:
-            obj = s3_client.get_object(Bucket=UPLOADS_BUCKET, Key=image_keys[0])
-            image_bytes = obj["Body"].read()
-            # Detect media type from extension
-            ext = image_keys[0].rsplit(".", 1)[-1].lower() if "." in image_keys[0] else "png"
-            media_map = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "tiff": "image/tiff", "tif": "image/tiff"}
-            image_media_type = media_map.get(ext, "image/png")
+            obj = s3_client.get_object(Bucket=UPLOADS_BUCKET, Key=key)
+            ext = key.rsplit(".", 1)[-1].lower() if "." in key else "png"
+            images.append({
+                "bytes": obj["Body"].read(),
+                "media_type": MEDIA_MAP.get(ext, "image/png"),
+                "description": image_descriptions.get(key, ""),
+            })
         except Exception as e:
-            logger.warning("Failed to load image %s: %s", image_keys[0], e)
+            logger.warning("Failed to load image %s: %s", key, e)
+
+    drawing_notes: str = parsed_data.get("drawing_notes", "")
 
     # Build prompt (image-specific when raster input)
-    has_image = image_bytes is not None
+    has_image = len(images) > 0
     has_dxf = any(f.get("type") == "vector_cad" for f in parsed_data.get("files", []))
-    prompt = _build_image_prompt() if has_image and not has_dxf else _build_prompt(parsed_data)
+    prompt = _build_image_prompt(drawing_notes) if has_image and not has_dxf else _build_prompt(parsed_data)
 
     # Invoke AI
     from common.bedrock_client import get_bedrock_client
@@ -90,8 +94,7 @@ def lambda_handler(event: dict, context) -> dict:
     context_json = parsed_data.get("files") if has_dxf else None
     invoke_result = client.invoke_multimodal(
         prompt=prompt,
-        image_bytes=image_bytes,
-        image_media_type=image_media_type,
+        images=images if images else None,
         context_json=context_json,
     )
     send_token_usage(session_id, "AI_ANALYZING", invoke_result.input_tokens, invoke_result.output_tokens)
@@ -135,11 +138,13 @@ def lambda_handler(event: dict, context) -> dict:
     }
 
 
-def _build_image_prompt() -> str:
+def _build_image_prompt(drawing_notes: str = "") -> str:
     """Image-only analysis prompt: let the AI focus on reading the drawing visually."""
-    return """添付の2D図面画像を正確に読み取り、3Dモデルを生成するCadQueryスクリプトを作成してください。
-
-【図面読み取りの指示】
+    notes_section = ""
+    if drawing_notes:
+        notes_section = f"\n【ユーザー提供の図面情報・メモ】\n{drawing_notes}\n上記の情報を図面解析の補足として最優先で参照してください。\n"
+    return f"""添付の2D図面画像を正確に読み取り、3Dモデルを生成するCadQueryスクリプトを作成してください。
+{notes_section}
 ① まず図面上のすべての寸法値を一つずつ読み取ってリスト化してください
 ② 図面中のビュー（正面図・平面図・側面図）を各々識別してください
 ③ 円の数とサイズを正確に数えてください。「2x」「3x」などの表記は複数個を意味します
@@ -232,6 +237,7 @@ JSONのみを出力してください。他の説明文は不要です。
 def _build_prompt(parsed_data: dict) -> str:
     """DXF-based analysis prompt with entity data."""
     files = parsed_data.get("files", [])
+    drawing_notes: str = parsed_data.get("drawing_notes", "")
     file_desc = []
     for f in files:
         desc = f"- {f.get('s3_key', 'unknown')}: type={f.get('type', 'unknown')}"
@@ -241,9 +247,12 @@ def _build_prompt(parsed_data: dict) -> str:
         file_desc.append(desc)
 
     file_summary = "\n".join(file_desc) if file_desc else "ファイル情報なし"
+    notes_section = ""
+    if drawing_notes:
+        notes_section = f"\n【ユーザー提供の図面情報・メモ】\n{drawing_notes}\n上記の情報を最優先で参照してください。\n"
 
     return f"""以下の2D図面情報から3Dモデルを生成するCadQueryスクリプトを作成してください。
-
+{notes_section}
 【入力ファイル】
 {file_summary}
 

@@ -20,6 +20,7 @@ type ProcessingMode = "auto" | "buildplan";
 type UploadStatus = "idle" | "uploading" | "processing" | "error";
 
 const ALLOWED_EXTENSIONS = [".dxf", ".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".tif"];
+const MAX_FILES = 5;
 
 const PIPELINE_STEPS = [
   { key: "PARSING",      label: "ファイル解析中",    pct: 20 },
@@ -35,21 +36,45 @@ export function UploadPanel({ idToken, onSessionCreated, onProcessingComplete, o
   const [status, setStatus] = useState<UploadStatus>("idle");
   const [projectName, setProjectName] = useState("");
   const [files, setFiles] = useState<File[]>([]);
+  const [fileDescriptions, setFileDescriptions] = useState<Record<string, string>>({});
+  const [drawingNotes, setDrawingNotes] = useState("");
   const [error, setError] = useState("");
   const [sessionId, setSessionId] = useState("");
   const [mode, setMode] = useState<ProcessingMode>("auto");
 
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const selected = Array.from(e.target.files ?? []);
-    const invalid = selected.filter(
+    const combined = [...files, ...selected].slice(0, MAX_FILES);
+    const invalid = combined.filter(
       (f) => !ALLOWED_EXTENSIONS.some((ext) => f.name.toLowerCase().endsWith(ext)),
     );
     if (invalid.length > 0) {
       setError(`非対応ファイル: ${invalid.map((f) => f.name).join(", ")}`);
       return;
     }
-    setFiles(selected);
-    setError("");
+    if (files.length + selected.length > MAX_FILES) {
+      setError(`ファイルは最大 ${MAX_FILES} 枚まで選択できます（現在 ${files.length} 枚）`);
+    } else {
+      setError("");
+    }
+    setFiles(combined);
+    // Reset file input so the same file can be re-added after removal
+    e.target.value = "";
+  }, [files]);
+
+  const removeFile = useCallback((index: number) => {
+    setFiles((prev) => prev.filter((_, i) => i !== index));
+    setFileDescriptions((prev) => {
+      const next = { ...prev };
+      delete next[index];
+      // Shift keys above the removed index
+      const shifted: Record<string, string> = {};
+      Object.entries(next).forEach(([k, v]) => {
+        const n = Number(k);
+        shifted[n > index ? String(n - 1) : k] = v;
+      });
+      return shifted;
+    });
   }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -67,7 +92,7 @@ export function UploadPanel({ idToken, onSessionCreated, onProcessingComplete, o
       const sessionRes = await fetch(`${API_BASE}/sessions`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeader },
-        body: JSON.stringify({ project_name: projectName || "Untitled" }),
+        body: JSON.stringify({ project_name: projectName || "Untitled", drawing_notes: drawingNotes }),
       });
       if (!sessionRes.ok) throw new Error("セッション作成に失敗しました");
 
@@ -76,7 +101,9 @@ export function UploadPanel({ idToken, onSessionCreated, onProcessingComplete, o
       onSessionCreated(session.session_id);
 
       // 2. Upload each file
-      for (const file of files) {
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i]!;
+        const description = fileDescriptions[i] ?? "";
         const uploadRes = await fetch(
           `${API_BASE}/sessions/${session.session_id}/upload`,
           {
@@ -85,6 +112,7 @@ export function UploadPanel({ idToken, onSessionCreated, onProcessingComplete, o
             body: JSON.stringify({
               filename: file.name,
               content_type: file.type || "application/octet-stream",
+              description,
             }),
           },
         );
@@ -102,6 +130,7 @@ export function UploadPanel({ idToken, onSessionCreated, onProcessingComplete, o
 
       if (mode === "buildplan") {
         // BuildPlan モード: パイプラインを起動せずに BuildPlan 画面へ遷移
+        // drawing_notes はセッション作成時に既に保存されている
         setStatus("idle");
         onBuildPlanStart(session.session_id);
         return;
@@ -203,7 +232,7 @@ export function UploadPanel({ idToken, onSessionCreated, onProcessingComplete, o
 
         <div>
           <label htmlFor="file-input" className="mb-1 block text-sm font-medium text-gray-700">
-            図面ファイル
+            図面ファイル <span className="text-xs text-gray-400">（最大{MAX_FILES}枚）</span>
           </label>
           <input
             id="file-input"
@@ -211,30 +240,70 @@ export function UploadPanel({ idToken, onSessionCreated, onProcessingComplete, o
             multiple
             accept={ALLOWED_EXTENSIONS.join(",")}
             onChange={handleFileChange}
-            className="w-full rounded-lg border px-3 py-2 text-sm file:mr-3 file:rounded file:border-0 file:bg-blue-50 file:px-3 file:py-1 file:text-sm file:font-medium file:text-blue-700"
+            disabled={files.length >= MAX_FILES || status === "uploading" || status === "processing"}
+            className="w-full rounded-lg border px-3 py-2 text-sm file:mr-3 file:rounded file:border-0 file:bg-blue-50 file:px-3 file:py-1 file:text-sm file:font-medium file:text-blue-700 disabled:opacity-50"
             aria-describedby="file-help"
           />
           <p id="file-help" className="mt-1 text-xs text-gray-500">
-            対応形式: DXF, PDF, PNG, JPG, TIFF (最大50MB)
+            対応形式: DXF, PDF, PNG, JPG, TIFF (最大50MB / 1ファイル) ・ {files.length}/{MAX_FILES} 枚選択中
           </p>
         </div>
 
         {files.length > 0 && (
-          <ul className="space-y-1" aria-label="選択ファイル一覧">
-            {files.map((file) => (
+          <ul className="space-y-2" aria-label="選択ファイル一覧">
+            {files.map((file, index) => (
               <li
-                key={file.name}
-                className="flex items-center gap-2 rounded bg-gray-50 px-3 py-1.5 text-sm text-gray-700"
+                key={`${file.name}-${index}`}
+                className="rounded-lg border border-gray-200 bg-gray-50 p-3"
               >
-                <span className="text-gray-400" aria-hidden="true">📄</span>
-                {file.name}
-                <span className="ml-auto text-xs text-gray-400">
-                  {(file.size / 1024).toFixed(0)} KB
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className="text-gray-400" aria-hidden="true">📄</span>
+                  <span className="flex-1 truncate text-sm text-gray-700">{file.name}</span>
+                  <span className="text-xs text-gray-400">{(file.size / 1024).toFixed(0)} KB</span>
+                  <button
+                    type="button"
+                    onClick={() => removeFile(index)}
+                    className="ml-1 rounded p-0.5 text-gray-400 hover:bg-gray-200 hover:text-red-500"
+                    aria-label={`${file.name} を削除`}
+                    disabled={status === "uploading" || status === "processing"}
+                  >
+                    ✕
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  value={fileDescriptions[index] ?? ""}
+                  onChange={(e) =>
+                    setFileDescriptions((prev) => ({ ...prev, [index]: e.target.value }))
+                  }
+                  placeholder="この図面の説明（例: 正面図、側面図、寸法補足 など）"
+                  className="mt-2 w-full rounded border px-2 py-1 text-xs text-gray-600 placeholder-gray-400 focus:border-blue-400 focus:ring-1 focus:ring-blue-400"
+                  aria-label={`${file.name} の説明`}
+                  disabled={status === "uploading" || status === "processing"}
+                />
               </li>
             ))}
           </ul>
         )}
+
+        <div>
+          <label htmlFor="drawing-notes" className="mb-1 block text-sm font-medium text-gray-700">
+            図面情報・補足メモ <span className="text-xs text-gray-400">（任意）</span>
+          </label>
+          <textarea
+            id="drawing-notes"
+            value={drawingNotes}
+            onChange={(e) => setDrawingNotes(e.target.value)}
+            placeholder="材質、表面処理、特殊な寸法・公差、注意事項など、AIへ伝えたい情報を自由に記入してください"
+            rows={3}
+            className="w-full rounded-lg border px-3 py-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+            aria-describedby="notes-help"
+            disabled={status === "uploading" || status === "processing"}
+          />
+          <p id="notes-help" className="mt-1 text-xs text-gray-500">
+            記入した情報はAIの解析精度向上に使われます
+          </p>
+        </div>
 
         {error && (
           <p className="rounded-lg bg-red-50 px-4 py-2 text-sm text-red-700" role="alert">

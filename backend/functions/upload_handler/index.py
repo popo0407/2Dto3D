@@ -54,6 +54,7 @@ def _create_session(event: dict) -> dict:
     user_id = _get_user_id(event)
     body = json.loads(event.get("body") or "{}")
     project_name = body.get("project_name", "Untitled")
+    drawing_notes: str = body.get("drawing_notes", "").strip()
 
     session_id = str(uuid.uuid4())
     now = int(time.time())
@@ -65,6 +66,8 @@ def _create_session(event: dict) -> dict:
         "status": "UPLOADING",
         "current_node_id": "",
         "input_files": [],
+        "input_file_descriptions": {},
+        "drawing_notes": drawing_notes,
         "created_at": now,
         "updated_at": now,
         "ttl": now + 90 * 86400,
@@ -98,17 +101,45 @@ def _presigned_upload(event: dict) -> dict:
         ExpiresIn=600,
     )
 
-    # Register file in session
+    # Register file (and optional description) in session
+    description: str = body.get("description", "").strip()
     table = dynamodb.Table(SESSIONS_TABLE)
-    table.update_item(
-        Key={"session_id": session_id},
-        UpdateExpression="SET input_files = list_append(if_not_exists(input_files, :empty), :file), updated_at = :now",
-        ExpressionAttributeValues={
-            ":file": [s3_key],
-            ":empty": [],
-            ":now": int(time.time()),
-        },
-    )
+
+    update_expr = "SET input_files = list_append(if_not_exists(input_files, :empty), :file), updated_at = :now"
+    expr_values: dict = {
+        ":file": [s3_key],
+        ":empty": [],
+        ":now": int(time.time()),
+    }
+
+    if description:
+        # Merge into input_file_descriptions map: {s3_key: description}
+        update_expr += ", input_file_descriptions.#k = :desc"
+        table.update_item(
+            Key={"session_id": session_id},
+            UpdateExpression="SET input_files = list_append(if_not_exists(input_files, :empty), :file),"
+                             " input_file_descriptions = if_not_exists(input_file_descriptions, :emptymap),"
+                             " updated_at = :now",
+            ExpressionAttributeValues={
+                ":file": [s3_key],
+                ":empty": [],
+                ":emptymap": {},
+                ":now": int(time.time()),
+            },
+        )
+        # Second update to add the specific key into the map
+        table.update_item(
+            Key={"session_id": session_id},
+            UpdateExpression="SET input_file_descriptions.#k = :desc",
+            ExpressionAttributeNames={"#k": s3_key},
+            ExpressionAttributeValues={":desc": description},
+        )
+    else:
+        table.update_item(
+            Key={"session_id": session_id},
+            UpdateExpression=update_expr,
+            ExpressionAttributeValues=expr_values,
+        )
 
     logger.info("Presigned URL generated for session %s: %s", session_id, s3_key)
     return _response(200, {"upload_url": presigned, "s3_key": s3_key})
@@ -116,16 +147,25 @@ def _presigned_upload(event: dict) -> dict:
 
 def _start_processing(event: dict) -> dict:
     session_id = event["pathParameters"]["session_id"]
+    body = json.loads(event.get("body") or "{}")
+    drawing_notes: str = body.get("drawing_notes", "").strip()
 
     table = dynamodb.Table(SESSIONS_TABLE)
+
+    update_expr = "SET #s = :status, updated_at = :now"
+    expr_values: dict = {
+        ":status": "PROCESSING",
+        ":now": int(time.time()),
+    }
+    if drawing_notes:
+        update_expr += ", drawing_notes = :notes"
+        expr_values[":notes"] = drawing_notes
+
     table.update_item(
         Key={"session_id": session_id},
-        UpdateExpression="SET #s = :status, updated_at = :now",
+        UpdateExpression=update_expr,
         ExpressionAttributeNames={"#s": "status"},
-        ExpressionAttributeValues={
-            ":status": "PROCESSING",
-            ":now": int(time.time()),
-        },
+        ExpressionAttributeValues=expr_values,
     )
 
     queue_url = os.environ.get("PROCESSING_QUEUE_URL", "")

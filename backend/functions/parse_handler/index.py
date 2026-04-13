@@ -62,6 +62,9 @@ def lambda_handler(event: dict, context) -> dict:
     if not input_files:
         raise ValueError(f"No input files for session: {session_id}")
 
+    input_file_descriptions: dict = session.get("input_file_descriptions", {})
+    drawing_notes: str = session.get("drawing_notes", "")
+
     # Parse each uploaded file
     parsed_files = []
     image_keys = []
@@ -80,6 +83,9 @@ def lambda_handler(event: dict, context) -> dict:
         elif ext in ("png", "jpg", "jpeg", "tiff", "tif"):
             image_keys.append(s3_key)
             file_meta["entities"] = {"type": "raster_image"}
+            desc = input_file_descriptions.get(s3_key, "")
+            if desc:
+                file_meta["description"] = desc
 
         parsed_files.append(file_meta)
 
@@ -129,6 +135,8 @@ def lambda_handler(event: dict, context) -> dict:
         "files": parsed_files,
         "image_keys": image_keys,
         "file_count": len(parsed_files),
+        "drawing_notes": drawing_notes,
+        "image_descriptions": {k: v for k, v in input_file_descriptions.items() if k in image_keys},
     }
 
     logger.info(
