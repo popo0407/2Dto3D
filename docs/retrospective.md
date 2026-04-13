@@ -1,5 +1,28 @@
 # 振り返り（Retrospective）
 
+## 2026-04-13 穴あけ3Dプレビュー未表示修正
+
+### 問題
+段階的構築でφ15貫通穴×4（hole_through）が3Dプレビューに表示されない問題が3回の修正試行でも解消されなかった
+
+### 原因（3点）
+1. **`REVISE_SYSTEM_PROMPT`にコード形式制約がない**: ユーザーが「穴が開かない」と修正依頼すると、AIは`REVISE_SYSTEM_PROMPT`に従って回答するが、そこには`cq_code`形式の制約が一切なかった。そのため修正のたびに`result.cut(cylinder)`や`.transformed()+.cutBlind()`等の非標準形式が生成された
+2. **`pushPoints`内の計算式**: AIが`math.cos(math.radians(a))`等で座標を計算した場合、`parsePushPoints`の正規表現（数値リテラルのみ対象）が座標を抽出できず、デフォルト原点`(0,0)`1点のみ返していた
+3. **フロントエンドパーサーが`result.cut(cylinder)`パターン非対応**: `hole_through`ハンドラは`.hole()`形式のコードのみを処理し、`result.cut()`形式では「穴寸法を解析できず」として処理をスキップしていた
+
+### 対処
+| ファイル | 変更内容 |
+|---------|---------|
+| `backend/functions/buildplan_worker_handler/index.py` | `REVISE_SYSTEM_PROMPT`に`cq_code`形式厳守事項を追加（`result.cut()`禁止、`pushPoints`内数値リテラル必須、`import`文禁止）。`NEXT_STEP_PROMPT`の穴あけ指示に`math.cos`等計算式禁止を明記 |
+| `frontend/src/utils/cqPreview.ts` | `parseTransformedPoints()`・`extractTupleList()`ヘルパー関数を追加。`hole_through`ハンドラを強化：pushPoints座標が変数の場合のtupleリストフォールバック、`result.cut(cylinder)`パターンへの対応 |
+
+### 再発防止策
+- AIへの制約はプロンプト生成時だけでなく**修正時（REVISE）のシステムプロンプトにも必ず含める**
+- フロントエンドCSGパーサーは、AIが生成しうる代替コードパターンを複数サポートしてフォールバックを用意する
+- `pushPoints`内の座標は「計算済みの数値リテラルのみ」をプロンプトに明記する（`math.cos`等の計算式だと全パーサーが失敗）
+
+---
+
 ## 2026-04-13 ポケット3Dプレビュー修正
 
 ### 問題
