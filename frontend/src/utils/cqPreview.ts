@@ -86,9 +86,14 @@ function parseRect(code: string) {
   return m ? { w: f(m, 1), h: f(m, 2) } : null;
 }
 
-function parseCutBlind(code: string) {
-  const m = code.match(/\.cutBlind\(\s*(-?[\d.]+)\s*\)/);
-  return m ? Math.abs(f(m, 1)) : null;
+function parseCutBlind(code: string): number | null {
+  // Positional (with optional trailing args): .cutBlind(-15), .cutBlind(15), .cutBlind(-15, True)
+  const m1 = code.match(/\.cutBlind\(\s*(-?[\d.]+)\s*[,)]/);
+  if (m1) return Math.abs(f(m1, 1));
+  // Named parameter: .cutBlind(distanceToCut=-15) or .cutBlind(distance=-15)
+  const m2 = code.match(/\.cutBlind\([^)]*(?:distanceToCut|distance)\s*=\s*(-?[\d.]+)/);
+  if (m2) return Math.abs(f(m2, 1));
+  return null;
 }
 
 /** Returns all radii from .circle(r) calls in order (outermost approaches) */
@@ -309,7 +314,13 @@ export function buildCumulativePreview(
         // -------- Pocket --------
         case "pocket": {
           if (!baseBrush) break;
-          const depth = parseCutBlind(code);
+          // depth: try code first, then parameters fallback
+          let depth = parseCutBlind(code);
+          if (!depth) {
+            const p = step.parameters as Record<string, { value: unknown }> | undefined;
+            const dv = p?.depth?.value ?? p?.cut_depth?.value ?? p?.pocket_depth?.value;
+            if (typeof dv === "number" && dv > 0) depth = dv;
+          }
           if (!depth) { notes.push(`Step ${step.step_seq}: ポケットを解析できず`); break; }
           const face = parseFace(code);
           const centerOff = parseCenter(code) ?? { x: 0, y: 0 };
@@ -327,8 +338,16 @@ export function buildCumulativePreview(
           } else {
             // Circular pocket: .circle(r).cutBlind(d) or annular .circle(R).circle(r).cutBlind(d)
             const circles = parseCircles(code);
-            if (circles.length >= 1) {
-              const outerR = Math.max(...circles);
+            // radius fallback: try parameters when .circle() uses a variable name
+            let outerR: number | null = circles.length >= 1 ? Math.max(...circles) : null;
+            if (outerR === null) {
+              const p = step.parameters as Record<string, { value: unknown }> | undefined;
+              const diam = p?.diameter?.value ?? p?.outer_diameter?.value;
+              const rad = p?.radius?.value ?? p?.outer_radius?.value;
+              if (typeof diam === "number" && diam > 0) outerR = diam / 2;
+              else if (typeof rad === "number" && rad > 0) outerR = rad;
+            }
+            if (outerR !== null) {
               const cylGeo = new THREE.CylinderGeometry(outerR, outerR, height, 64);
               const cutter = makeBrush(cylGeo, pos, rot);
               const result = safeCut(baseBrush, cutter, notes, step.step_seq);

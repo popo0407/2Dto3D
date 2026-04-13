@@ -49,6 +49,8 @@ NEXT_STEP_PROMPT = """添付の2D図面を見て、3Dモデルを段階的に構
 - 確定済みステップの続きとして次に行う加工を1つだけ提案してください
 - 最初のステップは必ず base_body（直方体・円柱などのベース形状）にしてください
 - 穴あけは必ず .faces("...").workplane().pushPoints([...]).hole(d) 形式
+- ポケット加工は必ず .faces("<Z または >Z").workplane().circle(半径).cutBlind(深さ) 形式（矩形は .rect(w,h).cutBlind(深さ)）
+- cq_code 内の寸法値はすべて数値リテラル（変数名禁止、例: .circle(63) ○、.circle(r) ✗）
 - 全ての加工が完了した場合は {{"is_complete": true}} のみを返してください
 
 【step_type 一覧】

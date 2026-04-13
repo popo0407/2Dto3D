@@ -1,5 +1,58 @@
 # 振り返り（Retrospective）
 
+## 2026-04-13 ポケット3Dプレビュー修正
+
+### 問題
+- Step 0002（φ126 depth 15mm ポケット）が3Dプレビューに表示されず「⚠ Step 0002: ポケットを解析できず」エラーが出ていた
+
+### 原因（3点）
+1. `parseCutBlind` 正規表現が `.cutBlind(-15, True)` など追加引数付きのパターンにマッチしなかった（末尾を `\s*\)` で厳格に閉じていた）
+2. `parseCircles` は数値リテラルのみを対象としていたため、AI が `.circle(r)` のように変数名を使った場合に半径が取得できなかった
+3. `NEXT_STEP_PROMPT` にポケットコードのフォーマット指示がなく、AI が任意の記述スタイルを選んでいた
+
+### 対処
+| ファイル | 変更内容 |
+|---------|---------|
+| `frontend/src/utils/cqPreview.ts` | `parseCutBlind` 正規表現を `[,)]` に変更し追加引数・名前付き引数に対応。`pocket` ケースに `step.parameters` フォールバック（depth/radius）を追加 |
+| `backend/functions/buildplan_worker_handler/index.py` | `NEXT_STEP_PROMPT` にポケットコード形式ルール（`.circle().cutBlind()`）と数値リテラル強制の指示を追加 |
+
+### 再発防止策
+- CSGプレビュー用パーサーはAIコード生成の揺らぎを考慮し、正規表現の末尾条件を `[,)]` で許容するか、`step.parameters` フォールバックで補完する
+- 新しい `step_type` に対応するパーサーを追加する際は、AIプロンプトに対応するコードフォーマット制約を必ず追記する
+
+---
+
+## 2026-04-13 複数画像・図面メモ対応
+
+### 実施内容
+- 図面ファイルを最大5枚まとめてアップロード可能に
+- ファイルごとに説明（正面図・側面図 等）を入力できる入力欄を追加
+- AIへの補足情報（材質・公差・特記事項等）をテキストで入力するメモ欄を追加
+- 自動生成・段階的構築どちらのモードでも共通で動作
+
+### 変更ファイル
+
+| ファイル | 変更概要 |
+|---------|---------|
+| `frontend/src/components/UploadPanel.tsx` | 最大5枚制限・ファイル削除ボタン・per-file説明入力・図面メモ textarea 追加 |
+| `backend/common/bedrock_client.py` | `invoke_multimodal` が `images: list[dict]` で複数画像を受け付けるよう拡張（後方互換維持） |
+| `backend/functions/upload_handler/index.py` | セッション作成時に `drawing_notes` を保存・presigned URL リクエストに `description` を保存 |
+| `backend/functions/parse_handler/index.py` | `input_file_descriptions` / `drawing_notes` を DynamoDB から読み込み `parsed_data` に含める |
+| `backend/functions/ai_analyze_handler/index.py` | 全画像を読み込みマルチモーダル解析・プロンプトに `drawing_notes` を最優先セクションとして追加 |
+| `backend/functions/buildplan_worker_handler/index.py` | `_load_first_image` を `_load_all_images` に置換・revise/next_step 両方で全画像+メモを利用 |
+
+### 設計上のポイント
+
+- `drawing_notes` はセッション作成時（`POST /sessions`）に保存することで、BuildPlanモードでの余分な `/process` 呼び出しを回避
+- per-file description は DynamoDB の `input_file_descriptions: {s3_key: description}` マップに保存
+- Bedrockへは各画像の前に `【図面N: 説明】` テキストブロックを挿入し、AIが図面の役割を把握できるようにした
+
+### 再発防止策
+- 新しいセッション属性（`drawing_notes`, `input_file_descriptions`）はセッション作成時に初期化することで後続 Lambda での `KeyError` を防ぐ
+- TypeScript の `files[i]` は `File | undefined` と推論されるため `!` アサーションが必要
+
+
+
 ## 2025-03 初期実装
 
 ### 実施内容
